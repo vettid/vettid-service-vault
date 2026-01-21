@@ -540,7 +540,7 @@ interface ContractOffering {
     type: 'free' | 'one_time' | 'subscription';
     amount?: number;
     currency?: string;
-    billing_cycle?: 'monthly' | 'yearly';
+    billing_cycle?: 'daily' | 'weekly' | 'monthly' | 'yearly';
     trial_days?: number;
   };
 
@@ -1725,7 +1725,7 @@ interface SubscriptionPlan {
   pricing: {
     amount: number;
     currency: string;
-    billing_cycle: 'monthly' | 'yearly' | 'one_time';
+    billing_cycle: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'one_time';
   };
 
   features: string[];
