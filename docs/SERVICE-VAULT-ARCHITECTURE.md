@@ -2,14 +2,27 @@
 
 ## Executive Summary
 
-The **Service Vault** enables third-party applications and services to securely integrate with VettID users. While a user's personal vault (OwnerVault) is designed for direct user interaction via mobile apps, the Service Vault provides:
+The **Service Vault** enables third-party applications and services to connect with users. Service Vaults are **fully self-sovereign** - they operate independently with their own infrastructure, just as users control their own vaults.
 
-- **Secure API integration** for organizational services
-- **Scalable multi-user support** (one Service Vault handles many users)
-- **Event-driven communication** using NATS as a secure message drop-box
-- **Zero-knowledge authentication** - services can verify user identity without accessing user credentials
-- **User-controlled authorization** - users explicitly grant services specific capabilities via Connection Contracts
-- **User-centric data model** - services store user-specific secrets in the user's vault, not in the service vault
+**VettID's role is infrastructure only:**
+- Hosts user vaults (OwnerVaults) - encrypted, user-controlled
+- Operates MessageSpace (NATS) - event routing infrastructure
+- Provides event handlers for external transactions (e.g., putting BTC on-chain)
+- **Does NOT** approve, control, or intermediate user-service interactions
+
+**Service Vault characteristics:**
+- **Self-sovereign identity** - key-derived, no central assignment
+- **Fully standalone** - operates own NATS cluster, no VettID dependency
+- **Direct contracts** - user signs connection contract with their key
+- **Scalable multi-user support** - one Service Vault handles many users
+- **Event-driven communication** - NATS as secure message transport
+- **Optional registry** - can register with VettID or other registries for discoverability
+
+**Connection model:**
+- Users and services connect directly via NATS events
+- Connection contracts are cryptographically signed by user's key
+- Services offer multiple options (tiers, pricing, data requirements)
+- User selects and signs - no approval needed from anyone
 
 ---
 
@@ -19,13 +32,15 @@ The **Service Vault** enables third-party applications and services to securely 
 
 | Term | Description |
 |------|-------------|
-| **Service Vault** | A vault deployed and controlled by a 3rd party organization to integrate their service with VettID |
+| **Service Vault** | A vault deployed and controlled by a 3rd party organization to integrate their service with users |
 | **Service Provider** | The organization operating the Service Vault |
+| **Service Identity** | Key-derived cryptographic identity (`service_id = base58(sha256(pubkey))`) controlled by the service provider |
 | **OwnerVault** | The user's personal vault (existing VettID architecture) |
 | **Service Connection** | An authorized relationship between a user and a service |
 | **Connection Contract** | The agreement defining what capabilities a user grants to a service |
-| **Service Registry** | VettID's directory of approved services (requires VettID approval) |
-| **Service Directory** | User-facing catalog for discovering and connecting to services |
+| **Service Registry** | Any directory of services that issues attestations (VettID operates one, others may exist) |
+| **Registry Attestation** | A signed statement from a registry verifying claims about a service |
+| **Domain Validation** | Optional DNS-based proof linking a service identity to a domain |
 
 ### 1.2 Relationship Model
 
@@ -75,7 +90,7 @@ This separation ensures services control their own infrastructure for receiving 
 │  │                    Service's NATS Cluster                            │    │
 │  │                       (ServiceSpace)                                 │    │
 │  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │  ServiceSpace.<service_guid>/                               │    │    │
+│  │  │  ServiceSpace.<service_id>/                               │    │    │
 │  │  │    fromUser.<user_guid>.>    ← User responses & events      │    │    │
 │  │  │    internal.>                ← Service internal messaging   │    │    │
 │  │  └─────────────────────────────────────────────────────────────┘    │    │
@@ -130,95 +145,230 @@ This separation ensures services control their own infrastructure for receiving 
 
 ### 2.1 Service Identity
 
-Each Service Vault has a unique cryptographic identity **generated and controlled by the service provider**:
+Each Service Vault has a **self-sovereign cryptographic identity** derived from its public key:
 
 ```
 Service Identity Structure:
-├── service_guid: UUID (globally unique, assigned by VettID registry)
-├── organization_id: string (registered organization)
-├── service_name: string (human-readable)
-├── service_type: enum (AUTHENTICATOR | AUTHORIZER | DATA_PROVIDER | INTEGRATION | SUPPORT | PAYMENT)
-├── public_key: Ed25519 public key (provider-generated, registered with VettID)
+├── service_id: string (derived from public key - see below)
+├── public_key: Ed25519 public key (provider-generated)
 ├── encryption_key: X25519 public key (provider-generated, for key exchange)
-├── nats_account_id: string (NATS account for service)
-├── service_directory_entry: object (public listing information)
-└── handler_manifest: object (supported event types/capabilities)
+├── service_name: string (human-readable display name)
+├── service_type: enum (AUTHENTICATOR | AUTHORIZER | DATA_PROVIDER | INTEGRATION | SUPPORT | PAYMENT)
+├── nats_endpoint: string (service's NATS cluster endpoint)
+├── handler_manifest: object (supported event types/capabilities)
+│
+├── [Optional - Domain Validation]
+│   ├── domain: string (e.g., "acme.com")
+│   ├── domain_verified: boolean
+│   └── dns_proof: string (TXT record value proving ownership)
+│
+├── [Optional - Registry Attestations]
+│   └── attestations: [
+│         { registry: "vettid", attestation: object, verified_at: string },
+│         { registry: "other-registry", attestation: object, verified_at: string },
+│         ...
+│       ]
 ```
 
-### 2.2 Service Registration Flow
+**Identity Derivation (Required):**
+```
+service_id = base58(sha256(public_key)[0:20])
+```
+This guarantees global uniqueness - the identity IS the key.
 
-VettID provides a **Service Registry** where services register their details. VettID may require approval before a service can connect to users. **The service provider controls all their own keys and infrastructure.**
+**Domain Validation (Optional):**
+
+Services can associate a domain with their identity for human-readable verification:
 
 ```
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│  Service Admin  │         │  VettID Portal  │         │  Control Plane  │
-│  (3rd Party)    │         │  (Registry)     │         │                 │
-└────────┬────────┘         └────────┬────────┘         └────────┬────────┘
-         │                           │                           │
-         │  1. Generate service keys │                           │
-         │     locally (Ed25519,     │                           │
-         │     X25519 keypairs)      │                           │
-         │                           │                           │
-         │  2. Register Service      │                           │
-         │ ─────────────────────────►│                           │
-         │   - Organization details  │                           │
-         │   - Service metadata      │                           │
-         │   - PUBLIC keys only      │                           │
-         │   - Handler manifest      │                           │
-         │   - Directory listing     │                           │
-         │                           │                           │
-         │                           │  3. Review & Approve      │
-         │                           │     (VettID vetting)      │
-         │                           │ ─────────────────────────►│
-         │                           │                           │
-         │                           │  4. Create NATS account   │
-         │                           │     (permissions based    │
-         │                           │      on service type)     │
-         │                           │◄───────────────────────── │
-         │                           │                           │
-         │  5. Return Registration   │                           │
-         │◄───────────────────────── │                           │
-         │   - service_guid          │                           │
-         │   - NATS account details  │                           │
-         │   - Endpoint configuration│                           │
-         │                           │                           │
-         │  6. Deploy Service Vault  │                           │
-         │     with own keys         │                           │
-         │     (provider controls)   │                           │
-         │                           │                           │
+1. Service claims domain "acme.com"
+
+2. Service creates DNS TXT record:
+   _vettid-service.acme.com TXT "service_id=<service_id>;key=<public_key_fingerprint>"
+
+3. Anyone can verify:
+   - Lookup DNS TXT record
+   - Confirm service_id matches the service's actual key-derived ID
+   - Domain owner has proven they control this service identity
 ```
 
-**Important**: VettID never possesses the service's private keys. The service provider:
-- Generates their own Ed25519 signing keypair
-- Generates their own X25519 encryption keypair
-- Registers only public keys with VettID
-- Maintains complete control over their private keys and infrastructure
+This allows users to see "Acme Service (acme.com ✓)" rather than just a cryptographic ID.
 
-### 2.3 Service Authentication to NATS
+### 2.2 Service Operation Model
 
-Services connect to **two NATS environments** with different credentials:
+Services operate **fully standalone** by default. Registry registration is optional and registry-agnostic:
 
-#### VettID NATS (for sending to users via MessageSpace)
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         STANDALONE SERVICE OPERATION                         │
+│                            (Default - No Registry)                           │
+│                                                                              │
+│  ┌─────────────────┐                              ┌─────────────────┐       │
+│  │  Service Admin  │                              │  User           │       │
+│  └────────┬────────┘                              └────────┬────────┘       │
+│           │                                                │                │
+│           │  1. Generate service identity                  │                │
+│           │     - Ed25519 signing keypair                  │                │
+│           │     - X25519 encryption keypair                │                │
+│           │     - service_id = base58(sha256(pubkey))      │                │
+│           │     - Set up own NATS cluster                  │                │
+│           │                                                │                │
+│           │  2. Deploy Service Vault                       │                │
+│           │     (fully self-hosted)                        │                │
+│           │                                                │                │
+│           │  3. [Optional] Add domain validation           │                │
+│           │     (DNS TXT record)                           │                │
+│           │                                                │                │
+│           │  4. Share connection info with users           │                │
+│           │     (QR code, link, direct exchange)           │                │
+│           │ ──────────────────────────────────────────────►│                │
+│           │   - service_id                                 │                │
+│           │   - public_key + encryption_key                │                │
+│           │   - nats_endpoint                              │                │
+│           │   - handler_manifest                           │                │
+│           │   - domain (if validated)                      │                │
+│           │                                                │                │
+│           │  5. User connects directly                     │                │
+│           │◄────────────────────────────────────────────── │                │
+│           │     (peer-to-peer contract)                    │                │
+│           │                                                │                │
+│  SERVICE IS FULLY OPERATIONAL - NO REGISTRY NEEDED         │                │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 2.3 Optional Registry Registration
+
+Services may choose to register with one or more service registries for discoverability. VettID operates one such registry, but others may exist:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      OPTIONAL REGISTRY REGISTRATION                          │
+│                                                                              │
+│  ┌─────────────────┐         ┌─────────────────┐                            │
+│  │     Service     │         │  Service        │    (Any registry that      │
+│  │  (Standalone)   │         │  Registry       │     implements the         │
+│  └────────┬────────┘         │  ┌───────────┐  │     registry protocol)     │
+│           │                  │  │  VettID   │  │                            │
+│           │                  │  │  Registry │  │                            │
+│           │                  │  └───────────┘  │                            │
+│           │                  │  ┌───────────┐  │                            │
+│           │                  │  │  Other    │  │                            │
+│           │                  │  │  Registry │  │                            │
+│           │                  │  └───────────┘  │                            │
+│           │                  └────────┬────────┘                            │
+│           │                           │                                      │
+│           │  1. Request Registration  │                                      │
+│           │ ─────────────────────────►│                                      │
+│           │   - service_id (key-derived)                                     │
+│           │   - public_key                                                   │
+│           │   - domain (if validated)                                        │
+│           │   - handler_manifest                                             │
+│           │   - organization details                                         │
+│           │                           │                                      │
+│           │                           │  2. Registry verification            │
+│           │                           │     - Verify key ownership           │
+│           │                           │     - Verify domain (if claimed)     │
+│           │                           │     - Organization vetting           │
+│           │                           │       (registry-specific)            │
+│           │                           │                                      │
+│           │  3. Attestation issued    │                                      │
+│           │◄───────────────────────── │                                      │
+│           │   - Signed attestation                                           │
+│           │   - Directory listing                                            │
+│           │   - Registry-specific benefits                                   │
+│           │                                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Registry Attestation Structure:**
+```typescript
+interface RegistryAttestation {
+  registry_id: string;              // e.g., "vettid", "industry-consortium"
+  registry_public_key: string;      // Registry's signing key
+  service_id: string;               // The service being attested
+  attestation_type: string;         // "verified_org", "domain_validated", etc.
+  claims: {
+    organization_name?: string;
+    domain?: string;
+    verification_level?: string;    // "basic", "enhanced", "audited"
+    [key: string]: any;
+  };
+  issued_at: string;
+  expires_at: string;
+  signature: string;                // Registry's signature over the attestation
+}
+```
+
+**VettID Registry Benefits (when registered with VettID):**
+- Listed in VettID Service Directory (user discovery via VettID app)
+- VettID attestation badge shown to users
+- Optional: MessageSpace access (send to users via VettID's NATS infrastructure)
+
+**Key Principles:**
+- Services are fully operational without any registry
+- Registration is always optional and service-initiated
+- Services can register with multiple registries simultaneously
+- No registry controls service identity (identity is key-derived)
+- Users can connect to unregistered services via direct key exchange
+
+### 2.4 Service NATS Authentication
+
+All services operate their own NATS cluster. This is the core communication infrastructure:
+
+#### Service's NATS Cluster (Required)
 
 ```typescript
-// Service JWT for VettID NATS (issued by VettID after registration approval)
+// User JWT for Service's NATS (issued by service to connected user)
+{
+  "aud": "NATS",
+  "exp": <timestamp + contract_duration>,
+  "iat": <timestamp>,
+  "iss": <service_operator_public_key>,  // Service is the NATS operator
+  "jti": <unique_id>,
+  "name": "user:<user_guid>",
+  "nats": {
+    "pub": {
+      "allow": [
+        "ServiceSpace.<service_id>.fromUser.<user_guid>.>"  // User → Service
+      ]
+    },
+    "sub": {
+      "allow": [
+        "ServiceSpace.<service_id>.toUser.<user_guid>.>"    // Service → User
+      ]
+    },
+    "subs": 20,
+    "data": 10000000,   // 10 MB/sec per user
+    "payload": 1048576  // 1 MB max message
+  },
+  "sub": <user_connection_public_key>  // User's key for this service
+}
+```
+
+#### VettID MessageSpace (Optional - VettID Registry Benefit)
+
+Services registered with VettID's registry can optionally use VettID's NATS infrastructure for outbound messages to users:
+
+```typescript
+// Service JWT for VettID NATS (issued by VettID to registered services)
 {
   "aud": "NATS",
   "exp": <timestamp + 30 days>,
   "iat": <timestamp>,
   "iss": <vettid_operator_public_key>,
   "jti": <unique_id>,
-  "name": "service:<service_guid>",
+  "name": "service:<service_id>",
   "nats": {
     "pub": {
       "allow": [
-        "MessageSpace.*.fromService.<service_guid>.>"  // Send to any user
+        "MessageSpace.*.fromService.<service_id>.>"  // Send to any VettID user
       ]
     },
     "sub": {
       "allow": [
-        "Control.service.<service_guid>.>",           // Control commands from VettID
-        "Directory.services.<service_guid>.>"         // Own directory entry
+        "Control.service.<service_id>.>",           // Control commands from VettID
+        "Directory.services.<service_id>.>"         // Own directory entry
       ]
     },
     "subs": 100,
@@ -229,43 +379,18 @@ Services connect to **two NATS environments** with different credentials:
 }
 ```
 
-#### Service's Own NATS (for receiving from users via ServiceSpace)
+**Why use MessageSpace?**
+- Reach users who haven't connected yet (service discovery notifications)
+- Leverage VettID's global NATS infrastructure
+- Not required - services can operate entirely on their own NATS
 
-The service operates their own NATS cluster and issues credentials to connected users:
-
-```typescript
-// User JWT for Service's NATS (issued by service to connected user)
-{
-  "aud": "NATS",
-  "exp": <timestamp + contract_duration>,
-  "iat": <timestamp>,
-  "iss": <service_operator_public_key>,  // Service is the operator
-  "jti": <unique_id>,
-  "name": "user:<user_guid>",
-  "nats": {
-    "pub": {
-      "allow": [
-        "ServiceSpace.<service_guid>.fromUser.<user_guid>.>"  // User's response topics
-      ]
-    },
-    "sub": {
-      "allow": []  // Users don't subscribe to service NATS (they use VettID MessageSpace)
-    },
-    "subs": 10,
-    "data": 10000000,   // 10 MB/sec per user
-    "payload": 1048576  // 1 MB max message
-  },
-  "sub": <user_connection_public_key>  // User's key for this service
-}
-```
-
-### 2.4 Handler Manifest (Service Directory Integration)
+### 2.5 Handler Manifest
 
 Similar to how VettID's Service Directory lists event handlers, each Service Vault publishes a **Handler Manifest** describing its capabilities:
 
 ```typescript
 interface HandlerManifest {
-  service_guid: string;
+  service_id: string;
   version: string;
 
   // Capabilities this service offers
@@ -295,134 +420,259 @@ interface HandlerManifest {
 
 ## 3. User-Service Connections
 
-### 3.1 Connection Contract Establishment
+### 3.1 VettID Infrastructure Role
 
-Users must explicitly authorize services via a **Connection Contract**. The contract defines what the service can do and persists until either party cancels it.
+**VettID provides infrastructure, not control:**
 
 ```
-┌────────────┐     ┌────────────┐     ┌─────────────┐     ┌──────────────┐
-│  User App  │     │ User Vault │     │ VettID API  │     │ Service Vault│
-└─────┬──────┘     └─────┬──────┘     └──────┬──────┘     └──────┬───────┘
-      │                  │                   │                   │
-      │ 1. User browses  │                   │                   │
-      │    Service       │                   │                   │
-      │    Directory     │                   │                   │
-      │ ─────────────────┼──────────────────►│                   │
-      │                  │                   │                   │
-      │ 2. Select service│                   │                   │
-      │    to connect    │                   │                   │
-      │ ─────────────────►                   │                   │
-      │                  │                   │                   │
-      │                  │ 3. Fetch service  │                   │
-      │                  │    contract terms │                   │
-      │                  │ ─────────────────►│                   │
-      │                  │                   │                   │
-      │ 4. Display       │                   │                   │
-      │    contract      │                   │                   │
-      │    (capabilities,│                   │                   │
-      │     terms, costs)│                   │                   │
-      │◄─────────────────┤                   │                   │
-      │                  │                   │                   │
-      │ 5. User reviews  │                   │                   │
-      │    & signs       │                   │                   │
-      │    contract      │                   │                   │
-      │ ─────────────────►                   │                   │
-      │                  │                   │                   │
-      │                  │ 6. Generate       │                   │
-      │                  │    connection keys│                   │
-      │                  │    (X25519 pair)  │                   │
-      │                  │                   │                   │
-      │                  │ 7. Store contract │                   │
-      │                  │    + notify       │                   │
-      │                  │ ─────────────────►│                   │
-      │                  │                   │                   │
-      │                  │                   │ 8. Route to       │
-      │                  │                   │    service        │
-      │                  │                   │ ─────────────────►│
-      │                  │                   │                   │
-      │                  │                   │  9. Service acks  │
-      │                  │                   │     + sends pubkey│
-      │                  │                   │◄───────────────── │
-      │                  │                   │                   │
-      │                  │ 10. Complete key  │                   │
-      │                  │     exchange      │                   │
-      │                  │◄──────────────────┼───────────────────│
-      │                  │                   │                   │
-      │ 11. Contract     │                   │                   │
-      │     active       │                   │                   │
-      │◄─────────────────┤                   │                   │
-      │                  │                   │                   │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        VETTID INFRASTRUCTURE                                 │
+│                                                                              │
+│  What VettID provides:                                                       │
+│  ├── User Vaults (OwnerVaults) - hosted, encrypted, user-controlled         │
+│  ├── MessageSpace (NATS) - event routing infrastructure                     │
+│  └── Event Handlers - process external transactions (e.g., BTC on-chain)    │
+│                                                                              │
+│  What VettID does NOT do:                                                    │
+│  ├── Approve or reject services                                             │
+│  ├── Approve or reject connections                                          │
+│  ├── Intermediate or route contract negotiations                            │
+│  ├── Control what users or services do                                      │
+│  └── Have visibility into encrypted vault contents                          │
+│                                                                              │
+│  Vault Communication Model:                                                  │
+│  ├── IN:  Events received via NATS subscriptions                            │
+│  ├── OUT: Events published via NATS                                         │
+│  └── OUT: External transactions via event handlers (BTC, ETH, etc.)         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Connection Contract Structure
+### 3.2 Connection Contract Establishment
+
+Connection contracts are **direct agreements between user and service** - no intermediary. The contract is signed by the user's cryptographic key.
+
+```
+┌────────────┐     ┌────────────┐                         ┌──────────────┐
+│  User App  │     │ User Vault │         NATS            │ Service Vault│
+└─────┬──────┘     └─────┬──────┘    (MessageSpace/       └──────┬───────┘
+      │                  │            ServiceSpace)              │
+      │                  │                 │                     │
+      │ 1. User obtains  │                 │                     │
+      │    service info  │                 │                     │
+      │    (QR, link,    │                 │                     │
+      │     directory)   │                 │                     │
+      │                  │                 │                     │
+      │ 2. Request       │                 │                     │
+      │    contract offer│                 │                     │
+      │ ─────────────────►                 │                     │
+      │                  │                 │                     │
+      │                  │ 3. Fetch service│                     │
+      │                  │    contract     │                     │
+      │                  │    offerings    │                     │
+      │                  │ ────────────────┼────────────────────►│
+      │                  │                 │                     │
+      │                  │                 │  4. Return contract │
+      │                  │                 │     offer (multiple │
+      │                  │                 │     options/tiers)  │
+      │                  │◄────────────────┼─────────────────────│
+      │                  │                 │                     │
+      │ 5. Display       │                 │                     │
+      │    contract      │                 │                     │
+      │    options       │                 │                     │
+      │◄─────────────────┤                 │                     │
+      │                  │                 │                     │
+      │ 6. User selects  │                 │                     │
+      │    option &      │                 │                     │
+      │    signs with    │                 │                     │
+      │    their key     │                 │                     │
+      │ ─────────────────►                 │                     │
+      │                  │                 │                     │
+      │                  │ 7. Generate     │                     │
+      │                  │    connection   │                     │
+      │                  │    keys (X25519)│                     │
+      │                  │                 │                     │
+      │                  │ 8. Send signed  │                     │
+      │                  │    contract +   │                     │
+      │                  │    user pubkey  │                     │
+      │                  │ ────────────────┼────────────────────►│
+      │                  │                 │                     │
+      │                  │                 │  9. Service accepts │
+      │                  │                 │     + sends pubkey  │
+      │                  │                 │     + NATS creds    │
+      │                  │◄────────────────┼─────────────────────│
+      │                  │                 │                     │
+      │                  │ 10. Store       │                     │
+      │                  │     contract    │                     │
+      │                  │     locally     │                     │
+      │                  │                 │                     │
+      │ 11. Contract     │                 │                     │
+      │     active       │                 │                     │
+      │◄─────────────────┤                 │                     │
+      │                  │                 │                     │
+```
+
+**Key points:**
+- User vault and service vault communicate directly via NATS
+- No VettID approval or routing - VettID just provides infrastructure
+- Contract is signed by user's cryptographic key
+- Service offers multiple options; user selects one
+
+### 3.3 Service Contract Offer
+
+Services publish a **Contract Offer** with multiple options for users to choose from:
 
 ```typescript
-interface ConnectionContract {
-  contract_id: string;            // Unique contract identifier
-  user_guid: string;              // User's VettID GUID
-  service_guid: string;           // Service's identifier
+interface ServiceContractOffer {
+  service_id: string;               // Key-derived service identity
+  service_name: string;
+  service_public_key: string;       // Ed25519 for verification
+  service_encryption_key: string;   // X25519 for key exchange
+  service_nats_endpoint: string;    // Service's NATS cluster
 
-  // Contract terms
-  capabilities: CapabilityContract[];
+  // Domain validation (optional)
+  domain?: string;
+  domain_verified?: boolean;
 
-  // Connection security
-  user_connection_key: string;    // User's X25519 public key for this connection
-  service_connection_key: string; // Service's X25519 public key for this connection
+  // Registry attestations (optional)
+  attestations?: RegistryAttestation[];
 
-  // Lifecycle - persists until cancelled
-  created_at: string;             // ISO8601
-  last_activity_at: string;       // Updated on each interaction
-  cancelled_at: string | null;
-  cancelled_by: 'user' | 'service' | null;
-  cancellation_reason: string | null;
+  // Multiple contract options
+  offerings: ContractOffering[];
 
-  // Payment terms (if applicable)
-  subscription: SubscriptionContract | null;
+  // Offer metadata
+  offer_version: string;
+  valid_until?: string;             // Optional expiration
+}
 
-  // Consent record
-  consent: ConsentRecord;
+interface ContractOffering {
+  offering_id: string;
+  name: string;                     // e.g., "Basic", "Premium", "Enterprise"
+  description: string;
 
-  // Service-specific storage in user vault
-  vault_storage_allocation: {
-    private_namespace: string;    // Only this service can access
-    shared_namespaces: string[];  // Shared with approved services
+  // What capabilities this offering includes
+  capabilities: CapabilityGrant[];
+
+  // What data the service requires from user
+  required_data: DataRequirement[];
+
+  // Pricing (optional)
+  pricing?: {
+    type: 'free' | 'one_time' | 'subscription';
+    amount?: number;
+    currency?: string;
+    billing_cycle?: 'monthly' | 'yearly';
+    trial_days?: number;
   };
+
+  // Terms
+  terms_url?: string;
+  terms_hash?: string;              // Hash of terms for immutability
 }
 
-interface CapabilityContract {
+interface CapabilityGrant {
   capability: string;
-  scope: string[];
-  constraints: object;
-  granted_at: string;
-
-  // Request behavior
-  request_timeout: number;        // Service-defined timeout (1 min to 30 days)
-  offline_grace_period: number;   // Time after user comes online before expiry
-  requires_user_approval: boolean;// Whether to prompt user for each use
+  description: string;              // Human-readable explanation
+  scope?: string[];                 // Scope limitations
+  requires_approval_each_use: boolean;
 }
 
-interface ConsentRecord {
-  contract_version: string;       // Service's terms version
-  consent_timestamp: string;
-  user_signature: string;         // User signed the contract
-  presented_terms: object;        // Exact terms user agreed to
-}
-
-interface SubscriptionContract {
-  plan_id: string;
-  plan_name: string;
-  billing_cycle: 'monthly' | 'yearly' | 'one_time';
-  amount: number;
-  currency: string;
-  payment_method_ref: string;     // Reference to user's payment method in vault
-  auto_renew: boolean;
-  next_billing_date: string | null;
-  started_at: string;
-  expires_at: string | null;
+interface DataRequirement {
+  data_type: string;                // e.g., "email", "profile", "credential:drivers_license"
+  required: boolean;
+  purpose: string;                  // Why the service needs this
 }
 ```
 
-### 3.3 Capability Types
+### 3.4 Signed Connection Contract
+
+The user signs their chosen offering to create a binding contract:
+
+```typescript
+interface SignedConnectionContract {
+  // Contract identification
+  contract_id: string;              // Hash of contract content
+
+  // Parties (both key-derived identities)
+  user_id: string;                  // User's key-derived identity
+  service_id: string;               // Service's key-derived identity
+
+  // Selected offering
+  offering_id: string;              // Which offering user selected
+  offering_snapshot: ContractOffering; // Exact terms at time of signing
+
+  // Connection keys (generated per-contract for forward secrecy)
+  user_connection_key: string;      // User's X25519 public key for this connection
+  service_connection_key: string;   // Service's X25519 public key (filled on acceptance)
+
+  // Service NATS credentials (issued by service after acceptance)
+  service_nats_credentials?: {
+    endpoint: string;
+    account_jwt: string;
+    user_jwt: string;
+    user_seed: string;
+  };
+
+  // User's cryptographic signature
+  user_signature: {
+    signed_at: string;              // ISO8601
+    signing_key: string;            // User's Ed25519 public key
+    signature: string;              // Ed25519 signature over contract
+  };
+
+  // Service's acceptance signature
+  service_signature?: {
+    accepted_at: string;
+    signing_key: string;
+    signature: string;
+  };
+
+  // Lifecycle
+  status: 'pending' | 'active' | 'cancelled' | 'expired';
+  created_at: string;
+  activated_at?: string;
+  cancelled_at?: string;
+  cancelled_by?: 'user' | 'service';
+}
+```
+
+### 3.5 Contract Verification
+
+Anyone can verify a contract's authenticity without any central authority:
+
+```typescript
+function verifyContract(contract: SignedConnectionContract): boolean {
+  // 1. Verify user's identity matches their signing key
+  const expectedUserId = base58(sha256(contract.user_signature.signing_key).slice(0, 20));
+  if (contract.user_id !== expectedUserId) return false;
+
+  // 2. Verify user signed the contract
+  const signedData = canonicalize({
+    contract_id: contract.contract_id,
+    user_id: contract.user_id,
+    service_id: contract.service_id,
+    offering_id: contract.offering_id,
+    offering_snapshot: contract.offering_snapshot,
+    user_connection_key: contract.user_connection_key,
+    signed_at: contract.user_signature.signed_at
+  });
+
+  return ed25519.verify(
+    contract.user_signature.signature,
+    signedData,
+    contract.user_signature.signing_key
+  );
+}
+```
+
+**Security properties:**
+- User's signature cryptographically proves consent to specific terms
+- `offering_snapshot` captures exact terms at signing time
+- Contract ID is content hash - tamper-evident
+- Both parties sign, creating mutual cryptographic agreement
+- No central authority needed to verify
+
+### 3.6 Capability Types
 
 Standard capabilities that services can request:
 
@@ -557,7 +807,7 @@ User has full control:
 | `list_connections` | See what other services user is connected to | "See your other service connections" |
 | `request_collaboration` | Request shared data access with another service | "Share data between services you approve" |
 
-Custom capabilities can be defined by services and must be approved during registration.
+Services can define custom capabilities beyond these standard types. Custom capabilities are self-describing - no approval required.
 
 ---
 
@@ -584,7 +834,7 @@ Communication between services and users spans **two separate NATS environments*
 │  │   └── ...                                                                │
 │  │                                                                           │
 │  ├── MessageSpace.<user_guid>/            # Service → User communication    │
-│  │   └── fromService.<service_guid>/      # Messages from specific service  │
+│  │   └── fromService.<service_id>/      # Messages from specific service  │
 │  │       ├── auth.request                 # Authentication requests         │
 │  │       ├── authz.request                # Authorization requests          │
 │  │       ├── data.request                 # Data requests                   │
@@ -600,7 +850,7 @@ Communication between services and users spans **two separate NATS environments*
 │  │                                                                           │
 │  └── Directory/                           # VettID Service Directory        │
 │      ├── services.list                    # List all approved services      │
-│      ├── services.<service_guid>.info     # Service public info             │
+│      ├── services.<service_id>.info     # Service public info             │
 │      └── services.search                  # Search services                 │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -611,7 +861,7 @@ Communication between services and users spans **two separate NATS environments*
 │                                                                              │
 │  NATS Topics (Service operated):                                            │
 │  │                                                                           │
-│  ├── ServiceSpace.<service_guid>/         # Service's namespace             │
+│  ├── ServiceSpace.<service_id>/         # Service's namespace             │
 │  │   │                                                                       │
 │  │   ├── fromUser.<user_guid>/            # User Vault → Service            │
 │  │   │   ├── auth.response.<event_id>     # Auth responses                  │
@@ -644,7 +894,7 @@ Each user vault maintains connections to:
 ```typescript
 // User vault connection configuration per service contract
 interface ServiceNATSConnection {
-  service_guid: string;
+  service_id: string;
   nats_endpoint: string;           // Service's NATS cluster endpoint
   nats_credentials: {
     account_jwt: string;           // Issued by service for this user
@@ -748,7 +998,7 @@ Service Vault Deployment (Provider-Controlled):
 │  │              Service's NATS Cluster (ServiceSpace)                       │ │
 │  │                                                                          │ │
 │  │  ┌────────────────────────────────────────────────────────────────────┐ │ │
-│  │  │  ServiceSpace.<service_guid>/                                      │ │ │
+│  │  │  ServiceSpace.<service_id>/                                      │ │ │
 │  │  │    fromUser.*.>     ← Receives messages from connected users       │ │ │
 │  │  │    internal.>       ← Service internal messaging                   │ │ │
 │  │  └────────────────────────────────────────────────────────────────────┘ │ │
@@ -1153,7 +1403,7 @@ Service A wants to collaborate with Service B (both connected to user):
 2. Service A requests collaboration with Service B
    POST /api/v1/collaboration/request
    {
-     target_service_guid: "<service_b_guid>",
+     target_service_id: "<service_b_guid>",
      purpose: "Share health data for integrated fitness tracking",
      shared_data_schema: {
        fields: ["health_metrics", "activity_log"],
@@ -1192,7 +1442,7 @@ interface CombinedDatastore {
   purpose: string;
 
   participants: {
-    service_guid: string;
+    service_id: string;
     service_name: string;
     permissions: ('read' | 'write')[];
     joined_at: string;
@@ -1209,7 +1459,7 @@ interface CombinedDatastore {
   // Full audit trail
   audit_log: {
     timestamp: string;
-    service_guid: string;
+    service_id: string;
     operation: 'read' | 'write' | 'delete';
     field: string;
     summary: string;              // Human-readable description
@@ -1280,7 +1530,7 @@ interface SubscriptionPlan {
 // User's subscription in their vault
 interface UserSubscription {
   subscription_id: string;
-  service_guid: string;
+  service_id: string;
   plan: SubscriptionPlan;
 
   status: 'active' | 'cancelled' | 'expired' | 'payment_failed';
@@ -1372,7 +1622,7 @@ interface AuditEvent {
   timestamp: string;
 
   // Parties
-  service_guid: string;
+  service_id: string;
   user_guid: string;
   contract_id: string;
 
@@ -1402,7 +1652,27 @@ Users can view their complete audit log in the VettID app, seeing exactly what e
 
 Based on review feedback, the following design decisions have been made:
 
-### 9.1 Security Model
+### 9.1 Decentralized Service Identity
+
+**Decision**: Service identity is key-derived and self-sovereign. Registry registration is optional and registry-agnostic.
+
+**Rationale**:
+- Services should have the same self-sovereign principles as users
+- Identity must be cryptographically verifiable without any central authority
+- No registry should gate service operation
+- Multiple registries can coexist (VettID is one option among many)
+- Enables fully peer-to-peer connections
+
+**Implementation**:
+- Services generate their own cryptographic identity (Ed25519 + X25519)
+- `service_id = base58(sha256(public_key)[0:20])` - identity IS the key
+- Optional domain validation via DNS TXT records (human-readable association)
+- Services operate fully standalone on their own NATS infrastructure
+- Optional registration with any service registry (VettID, industry consortiums, etc.)
+- Registries provide attestations but don't control identity
+- Users can connect to unregistered services via direct key exchange
+
+### 9.2 Security Model
 
 **Decision**: Service Vaults do not require Nitro Enclaves.
 
@@ -1414,7 +1684,7 @@ Based on review feedback, the following design decisions have been made:
 
 **Recommendation**: Use HSM or cloud KMS for service signing key; encrypted database for connection keys.
 
-### 9.2 Connection Persistence
+### 9.3 Connection Persistence
 
 **Decision**: Connections persist until one party cancels.
 
@@ -1424,7 +1694,7 @@ Based on review feedback, the following design decisions have been made:
 - Inactive connections don't consume resources (messages queue in NATS)
 - Explicit cancellation gives both parties clear control
 
-### 9.3 Offline Support
+### 9.4 Offline Support
 
 **Decision**: Full offline support with service-defined expiration.
 
@@ -1434,7 +1704,7 @@ Based on review feedback, the following design decisions have been made:
 - Expired requests are discarded (or notification sent)
 - Supports both immediate interactions and long-lived offers
 
-### 9.4 Multi-Vault Services
+### 9.5 Multi-Vault Services
 
 **Decision**: Not required for MVP; scale horizontally within single logical service.
 
@@ -1444,17 +1714,19 @@ Based on review feedback, the following design decisions have been made:
 - Horizontal scaling (multiple instances behind load balancer) handles capacity
 - May revisit for geographic latency optimization in future
 
-### 9.5 Service Directory
+### 9.6 Service Registries
 
-**Decision**: VettID provides the Service Directory; services publish Handler Manifests.
+**Decision**: Registry-agnostic architecture. VettID operates one registry; others may exist.
 
 **Implementation**:
-- VettID maintains the user-facing Service Directory
-- Services publish capability/handler manifests to their ServiceSpace
-- Users browse Directory in VettID app to discover and connect to services
-- Similar pattern to existing VettID supported services (renamed to Service Directory)
+- Services operate standalone by default (no registry required)
+- Services may register with any registry (VettID, industry consortiums, etc.)
+- Registries issue attestations that services can present to users
+- VettID's registry provides: directory listing in VettID app, verified badge, optional MessageSpace access
+- Users can discover services via registries OR direct key exchange
+- Multiple attestations from different registries can coexist
 
-### 9.6 Billing Model
+### 9.7 Billing Model
 
 **Decision**: VettID does not charge for service vaults or connections.
 
@@ -1464,7 +1736,7 @@ Based on review feedback, the following design decisions have been made:
 - VettID has no visibility into payment transactions
 - Supports one-time payments, subscriptions, and auto-renewal
 
-### 9.7 Cross-Service Communication
+### 9.8 Cross-Service Communication
 
 **Decision**: No direct service-to-service communication. User-controlled combined datastores.
 
