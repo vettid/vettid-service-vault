@@ -655,16 +655,12 @@ function verifyContract(contract: SignedConnectionContract): boolean {
 
 Standard capabilities that services can request:
 
-#### Identity & Authentication
-| Capability | Description | User Prompt |
-|------------|-------------|-------------|
-| `authenticate` | Verify user identity | "Confirm your identity to this service" |
-| `authenticate.continuous` | Periodic re-authentication | "Allow ongoing identity verification" |
-| `verify_presence` | Check if user is available | "See when you're available" |
+#### User Profile (Automatic - Shared First)
 
-#### User Profile (Automatic)
-
-**User profile is automatically shared with all connections** - no capability required. When a user connects via QR code, link, or any other method, the service receives access to the user's profile in MessageSpace.
+**User profile is shared at the start of the connection process** - before contract negotiation. When a user scans a QR code or clicks a link to connect, the service immediately receives the user's public profile. This allows the service to:
+- See basic information about the user (e.g., location, display name)
+- Tailor contract offerings based on user context
+- Personalize the connection experience
 
 ```typescript
 interface UserProfile {
@@ -677,9 +673,19 @@ interface UserProfile {
 }
 ```
 
-Profile is delivered via MessageSpace when:
-- Contract is signed and activated
-- User updates their profile (connected services receive updates)
+**Profile sharing timeline:**
+1. **Connection initiation** (QR scan/link click): Service receives user's public profile
+2. **Contract negotiation**: Service can use profile to customize offerings (e.g., regional pricing)
+3. **After contract signed**: Service continues receiving profile updates via MessageSpace
+
+No capability is required for profile access - it's automatic for any connection attempt.
+
+#### Identity & Authentication
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `authenticate` | Verify user identity | "Confirm your identity to this service" |
+| `authenticate.continuous` | Periodic re-authentication | "Allow ongoing identity verification" |
+| `verify_presence` | Check if user is available | "See when you're available" |
 
 #### Data Access
 
@@ -761,36 +767,39 @@ Services can request that users store secrets in their protean credential. These
 
 | Capability | Description | User Prompt |
 |------------|-------------|-------------|
-| `secret.minor.write` | Store minor secrets in user's credential | "Store service data securely in your vault" |
+| `secret.minor.write` | Store minor secrets in user's protean credential | "Store service data securely in your credential" |
 | `secret.minor.read` | Retrieve minor secrets (no user interaction) | *(granted with write)* |
-| `secret.critical.write` | Store critical secrets in user's credential | "Store critical keys in your vault (password required to access)" |
+| `secret.critical.write` | Store critical secrets in user's protean credential | "Store critical keys in your credential (password required to access)" |
 | `secret.critical.read` | Retrieve critical secrets (requires password + approval) | "Release critical key to [Service]?" |
 | `secret.user_owned.issue` | Issue a secret that becomes user's own property | "Accept a key that you will fully own and control" |
 
 **Three Tiers of Service Secrets:**
 
-| Tier | Examples | Storage | Retrieval | User Can View | Who Controls |
-|------|----------|---------|-----------|---------------|--------------|
-| **Minor** | Encryption keys, session tokens, API keys | User approves once | Service retrieves automatically | No | Service |
-| **Critical** | Service's master keys, signing keys | User approves + authenticates | Password + approval each time | No | Service |
-| **User-Owned** | User's crypto wallet keys, personal signing keys | User approves + authenticates | User has full control | Yes | User |
+All service secrets are stored in the **user's protean credential** (not the vault). The protean credential is the secure, user-controlled container for sensitive cryptographic material.
+
+| Tier | Examples | Storage Location | Retrieval | User Can View | Who Controls |
+|------|----------|------------------|-----------|---------------|--------------|
+| **Minor** | Encryption keys, session tokens, API keys | Protean credential | Service retrieves automatically | No | Service |
+| **Critical** | Service's master keys, signing keys | Protean credential | Password + approval each time | No | Service |
+| **User-Owned** | User's crypto wallet keys, personal signing keys | Protean credential | User has full control | Yes | User |
 
 **Minor Secrets Flow:**
 ```
 1. Service requests: secret.minor.write
-2. User sees: "Acme Service wants to store encrypted data in your vault"
+2. User sees: "Acme Service wants to store encrypted data in your credential"
 3. User approves once
-4. Service can store/retrieve minor secrets without further interaction
-5. User cannot view the secret contents
+4. Secret stored in user's protean credential
+5. Service can store/retrieve minor secrets without further interaction
+6. User cannot view the secret contents
 ```
 
 **Critical Secrets Flow:**
 ```
 1. Service requests: secret.critical.write
-2. User sees: "Acme Service wants to store a critical key in your vault.
+2. User sees: "Acme Service wants to store a critical key in your credential.
               You'll need to enter your password to release it."
 3. User approves + enters password to confirm
-4. Secret stored in protean credential
+4. Secret stored in user's protean credential (encrypted, protected)
 
 Later, when service needs the secret:
 1. Service requests: secret.critical.read
@@ -798,7 +807,7 @@ Later, when service needs the secret:
               Purpose: Sign transaction #12345
               [Enter Password] [Deny]"
 3. User enters password + approves
-4. Secret released to service (user never sees the value)
+4. Protean credential releases secret to service (user never sees the value)
 ```
 
 **User-Owned Secrets Flow:**
@@ -870,6 +879,44 @@ User has full control:
 |------------|-------------|-------------|
 | `list_connections` | See what other services user is connected to | "See your other service connections" |
 | `request_collaboration` | Request shared data access with another service | "Share data between services you approve" |
+
+#### Recovery & Delegation (Critical)
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `recovery.designated_contact` | Be a designated recovery contact for user | "Become a recovery contact (help restore access if locked out)" |
+| `recovery.request_assist` | Request recovery assistance from user's designated contacts | "Request help from your recovery contacts" |
+| `emergency.access` | Emergency access to specified data/capabilities (e.g., medical emergency) | "Access emergency information if you're incapacitated" |
+| `delegate.temporary` | Receive temporary delegated access from user | "Act on your behalf temporarily" |
+
+**Recovery/Emergency properties:**
+- Designated contacts are cryptographically bound to user
+- Emergency access may require multiple contacts or time delay
+- All emergency access is fully logged
+- User defines what data/capabilities are accessible in emergencies
+
+#### Verification & Compliance (Critical)
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `verify.age` | Verify user meets minimum age requirement | "Verify you are over [age]" |
+| `verify.identity_level` | Verify identity verification level (KYC tier) | "Verify your identity verification level" |
+| `verify.location` | Verify user is in allowed jurisdiction | "Verify your current location" |
+| `compliance.audit_request` | Request compliance/audit data (with user approval) | "Provide audit data for [purpose]" |
+
+**Verification properties:**
+- Returns boolean/level only - not underlying documents
+- Service doesn't see how verification was achieved
+- User can use any qualifying credential
+
+#### Multi-Party Authorization (Critical)
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `multiparty.require` | Require multiple users to approve an action | "Require approval from [N] people" |
+| `multiparty.cosign` | Act as a co-signer for another user's action | "Co-sign [action] for [user]" |
+
+**Multi-party properties:**
+- Useful for business accounts, high-value transactions
+- Each party signs independently with their own key
+- Configurable threshold (e.g., 2-of-3, 3-of-5)
 
 Services can define custom capabilities beyond these standard types. Custom capabilities are self-describing - no approval required.
 
@@ -1537,35 +1584,135 @@ interface CombinedDatastore {
 
 ### 7.1 Payment Model
 
-VettID does not process payments or take fees. Payments are between the user and service:
+VettID does not directly process payments or take fees. Payment processing depends on the payment method:
+
+- **Traditional payments (credit/debit/ACH)**: User shares payment details with service; service processes via their own payment processor
+- **Cryptocurrency**: Service provides a transaction; user approves; user's vault puts transaction on-chain via event handlers
+
+```
+Payment Negotiation Flow:
+┌────────────────┐          ┌────────────────┐          ┌────────────────┐
+│  Service Vault │          │  User's Vault  │          │  User App      │
+└───────┬────────┘          └───────┬────────┘          └───────┬────────┘
+        │                           │                           │
+        │ 1. Request payment options│                           │
+        │ ─────────────────────────►│                           │
+        │   "What payment methods   │                           │
+        │    does user have?"       │                           │
+        │                           │                           │
+        │ 2. User's payment options │                           │
+        │◄───────────────────────── │                           │
+        │   {credit_card: true,     │                           │
+        │    debit_card: true,      │                           │
+        │    ach: false,            │                           │
+        │    btc: true,             │                           │
+        │    eth: false}            │                           │
+        │                           │                           │
+        │ 3. Present supported      │                           │
+        │    options + contract     │                           │
+        │ ─────────────────────────►│──────────────────────────►│
+        │   "Service accepts:       │                           │
+        │    credit/debit, BTC.     │  4. User selects         │
+        │    Select payment method" │     payment method        │
+        │                           │◄──────────────────────────│
+        │                           │                           │
+```
+
+#### Traditional Payment Flow (Credit/Debit/ACH)
+
+For traditional payment methods, actual payment details are sent to the service for processing:
 
 ```
 ┌────────────────┐          ┌────────────────┐          ┌────────────────┐
-│  Service Vault │          │  User's Vault  │          │ Payment Provider│
-│                │          │                │          │ (User's choice) │
+│  Service Vault │          │  User's Vault  │          │Service's Payment│
+│                │          │                │          │   Processor     │
 └───────┬────────┘          └───────┬────────┘          └───────┬────────┘
         │                           │                           │
-        │ 1. Payment request        │                           │
+        │ 1. User selected          │                           │
+        │    credit card            │                           │
+        │                           │                           │
+        │ 2. Request card details   │                           │
         │ ─────────────────────────►│                           │
-        │   {amount, currency,      │                           │
-        │    description}           │                           │
+        │   {amount: 29.99,         │                           │
+        │    currency: "USD",       │                           │
+        │    description: "..."}    │                           │
         │                           │                           │
-        │           2. User approves│in app                     │
+        │ 3. User approves in app   │                           │
+        │    (confirms amount)      │                           │
         │                           │                           │
-        │                           │ 3. Initiate payment       │
-        │                           │ ─────────────────────────►│
-        │                           │   (Using stored payment   │
-        │                           │    method reference)      │
-        │                           │                           │
-        │                           │ 4. Payment confirmation   │
-        │                           │◄───────────────────────── │
-        │                           │                           │
-        │ 5. Payment response       │                           │
+        │ 4. Card details sent      │                           │
         │◄───────────────────────── │                           │
-        │   {transaction_id,        │                           │
-        │    status: "completed"}   │                           │
+        │   {card_number: "...",    │                           │
+        │    exp: "...", cvv: "..."} │                          │
+        │                           │                           │
+        │ 5. Service processes      │                           │
+        │    payment                │                           │
+        │ ──────────────────────────┼──────────────────────────►│
+        │                           │                           │
+        │ 6. Payment result         │                           │
+        │◄──────────────────────────┼───────────────────────────│
+        │                           │                           │
+        │ 7. Confirm to user        │                           │
+        │ ─────────────────────────►│                           │
         │                           │                           │
 ```
+
+**Note:** Traditional payment processing is entirely handled by the service and their payment processor. VettID facilitates the secure transmission of payment details but does not process or store them.
+
+#### Cryptocurrency Payment Flow (VettID-Supported Chains)
+
+For cryptocurrency payments, the service cannot access user's private keys. Instead:
+
+```
+┌────────────────┐          ┌────────────────┐          ┌────────────────┐
+│  Service Vault │          │  User's Vault  │          │   Blockchain   │
+│                │          │  (has crypto   │          │                │
+│                │          │   private key) │          │                │
+└───────┬────────┘          └───────┬────────┘          └───────┬────────┘
+        │                           │                           │
+        │ 1. User selected BTC      │                           │
+        │                           │                           │
+        │ 2. Service creates        │                           │
+        │    unsigned transaction   │                           │
+        │ ─────────────────────────►│                           │
+        │   {to: <service_btc_addr>,│                           │
+        │    amount: 0.001,         │                           │
+        │    chain: "bitcoin"}      │                           │
+        │                           │                           │
+        │ 3. User sees transaction  │                           │
+        │    details in app:        │                           │
+        │    "Send 0.001 BTC to     │                           │
+        │     Acme Service?"        │                           │
+        │    [Approve] [Reject]     │                           │
+        │                           │                           │
+        │    (User CANNOT modify    │                           │
+        │     amount or recipient)  │                           │
+        │                           │                           │
+        │ 4. User approves          │                           │
+        │                           │                           │
+        │ 5. Vault signs & submits  │                           │
+        │    transaction            │                           │
+        │                           │ ─────────────────────────►│
+        │                           │   (via event handler)     │
+        │                           │                           │
+        │                           │ 6. Transaction confirmed  │
+        │                           │◄───────────────────────── │
+        │                           │                           │
+        │ 7. Confirmation to service│                           │
+        │◄───────────────────────── │                           │
+        │   {tx_hash: "...",        │                           │
+        │    status: "confirmed"}   │                           │
+        │                           │                           │
+```
+
+**Crypto payment properties:**
+- User's private keys never leave their vault
+- User can only approve or reject - cannot modify transaction
+- Vault's event handler puts signed transaction on-chain
+- Service receives confirmation with transaction hash
+- This is the only way VettID indirectly facilitates payment processing
+
+**Supported cryptocurrencies:** Determined by vault event handlers (e.g., Bitcoin, Ethereum, etc.)
 
 ### 7.2 Subscription Management
 
@@ -1907,7 +2054,8 @@ vettid-service-vault/
 | **Trust Level** | Full (user's own vault) | Limited (only contracted capabilities) |
 | **Key Generation** | VettID manages | Provider generates & manages |
 | **PII Storage** | Yes (encrypted) | No |
-| **Payment Processing** | Yes (user's methods) | No (requests only) |
+| **Traditional Payments** | Shares card details with service on approval | Processes via own payment processor |
+| **Crypto Payments** | Signs transactions, puts on-chain via event handlers | Creates unsigned transactions for user approval |
 
 ---
 
