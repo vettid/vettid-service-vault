@@ -281,9 +281,8 @@ ServiceSpace.<service_id>.internal.>             # Service internal
 
 ## 3. Infrastructure Components
 
-### 3.1 Compute Layer
+### 3.1 Compute Layer (AWS Fargate)
 
-**Option A: AWS Fargate (Recommended for Pool Tier)**
 ```typescript
 // CDK Configuration
 const cluster = new ecs.Cluster(this, 'ServiceVaultCluster', {
@@ -314,22 +313,6 @@ const service = new ecs.FargateService(this, 'ServiceVaultService', {
       weight: 20,  // 20% on-demand for stability
     },
   ],
-});
-```
-
-**Option B: Lambda (For Low-Traffic Services)**
-```typescript
-const handler = new lambda.Function(this, 'ServiceVaultHandler', {
-  runtime: lambda.Runtime.PROVIDED_AL2023,
-  architecture: lambda.Architecture.ARM_64,
-  memorySize: 256,
-  timeout: Duration.seconds(30),
-  handler: 'bootstrap',
-  code: lambda.Code.fromAsset('./dist'),
-  environment: {
-    DYNAMODB_TABLE: table.tableName,
-    NATS_URL: natsCluster.endpoint,
-  },
 });
 ```
 
