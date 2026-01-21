@@ -27,19 +27,34 @@ This project is currently in the design phase. The architecture document is read
 ## Key Concepts
 
 ### Service Identity
-Each Service Vault has a unique cryptographic identity (Ed25519 signing key, X25519 encryption key) registered with VettID.
+Each Service Vault has a **self-sovereign cryptographic identity**:
+- Key-derived ID: `service_id = base58(sha256(public_key))`
+- Ed25519 signing key + X25519 encryption key (provider-generated and controlled)
+- Optional domain validation via DNS
+- Optional registry registration (VettID or others) for discoverability
 
 ### User Connections
-Users must explicitly authorize services via their VettID app. Each connection has:
-- Specific capability grants (what the service can access)
-- Per-connection encryption keys
+Users authorize services by **signing connection contracts** with their cryptographic key:
+- Direct user-service agreement (no VettID approval needed)
+- Services offer multiple contract options (tiers, pricing, data requirements)
+- User profile automatically shared with all connections
+- Per-connection encryption keys for forward secrecy
 - User-controlled revocation
 
 ### Communication Model
 ```
-Service Backend → Service API → Service Vault → NATS → User Vault
-                                                     ↓
-                                                User App (approval if needed)
+Service → User: Via VettID MessageSpace (user's vault controls access)
+User → Service: Via Service's NATS cluster (ServiceSpace)
+
+┌─────────────┐                              ┌─────────────┐
+│ User Vault  │                              │Service Vault│
+└──────┬──────┘                              └──────┬──────┘
+       │                                            │
+       ▼                                            ▼
+┌─────────────┐         NATS Layer          ┌─────────────┐
+│ VettID NATS │◄───────────────────────────►│Service NATS │
+│(MessageSpace)│                            │(ServiceSpace)│
+└─────────────┘                              └─────────────┘
 ```
 
 ## Proposed Directory Structure
@@ -86,4 +101,4 @@ This project follows the same development practices as the main VettID repositor
 
 ## License
 
-Proprietary - VettID
+This project is licensed under the GNU Affero General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
