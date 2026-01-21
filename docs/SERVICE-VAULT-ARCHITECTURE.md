@@ -662,9 +662,28 @@ Standard capabilities that services can request:
 | `authenticate.continuous` | Periodic re-authentication | "Allow ongoing identity verification" |
 | `verify_presence` | Check if user is available | "See when you're available" |
 
+#### User Profile (Automatic)
+
+**User profile is automatically shared with all connections** - no capability required. When a user connects via QR code, link, or any other method, the service receives access to the user's profile in MessageSpace.
+
+```typescript
+interface UserProfile {
+  user_guid: string;       // User's unique identifier
+  display_name: string;    // Display name (1-100 chars)
+  avatar_url?: string;     // Avatar image URL
+  bio?: string;            // User biography (up to 500 chars)
+  location?: string;       // User's location (up to 100 chars)
+  last_updated: string;    // ISO8601 timestamp
+}
+```
+
+Profile is delivered via MessageSpace when:
+- Contract is signed and activated
+- User updates their profile (connected services receive updates)
+
 #### Data Access
 
-Services access user data through a metadata-first model. Users control what metadata is visible and must explicitly consent to share actual values.
+Beyond the automatic profile, services access user data through a metadata-first model. Users control what metadata is visible and must explicitly consent to share actual values.
 
 | Capability | Description | User Prompt |
 |------------|-------------|-------------|
