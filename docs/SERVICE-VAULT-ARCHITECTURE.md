@@ -312,11 +312,13 @@ interface RegistryAttestation {
 - No registry controls service identity (identity is key-derived)
 - Users can connect to unregistered services via direct key exchange
 
-### 2.4 Service NATS Authentication
+### 2.4 NATS Authentication
 
-All services operate their own NATS cluster. This is the core communication infrastructure:
+Services and users authenticate to two separate NATS environments:
 
-#### Service's NATS Cluster (Required)
+#### Service's NATS Cluster (ServiceSpace)
+
+Services operate their own NATS cluster for receiving messages from users:
 
 ```typescript
 // User JWT for Service's NATS (issued by service to connected user)
@@ -335,7 +337,7 @@ All services operate their own NATS cluster. This is the core communication infr
     },
     "sub": {
       "allow": [
-        "ServiceSpace.<service_id>.toUser.<user_guid>.>"    // Service → User
+        "ServiceSpace.<service_id>.toUser.<user_guid>.>"    // Service → User (setup only)
       ]
     },
     "subs": 20,
@@ -346,43 +348,21 @@ All services operate their own NATS cluster. This is the core communication infr
 }
 ```
 
-#### VettID MessageSpace (Optional - VettID Registry Benefit)
+#### VettID MessageSpace (User-Controlled)
 
-Services registered with VettID's registry can optionally use VettID's NATS infrastructure for outbound messages to users:
+Services send messages to users via VettID's MessageSpace. **The user's vault controls access** - only services with an active contract can publish to a user's MessageSpace topic:
 
 ```typescript
-// Service JWT for VettID NATS (issued by VettID to registered services)
-{
-  "aud": "NATS",
-  "exp": <timestamp + 30 days>,
-  "iat": <timestamp>,
-  "iss": <vettid_operator_public_key>,
-  "jti": <unique_id>,
-  "name": "service:<service_id>",
-  "nats": {
-    "pub": {
-      "allow": [
-        "MessageSpace.*.fromService.<service_id>.>"  // Send to any VettID user
-      ]
-    },
-    "sub": {
-      "allow": [
-        "Control.service.<service_id>.>",           // Control commands from VettID
-        "Directory.services.<service_id>.>"         // Own directory entry
-      ]
-    },
-    "subs": 100,
-    "data": 50000000,   // 50 MB/sec
-    "payload": 1048576  // 1 MB max message
-  },
-  "sub": <service_account_public_key>
-}
+// User's MessageSpace topic structure
+MessageSpace.<user_guid>.fromService.<service_id>.>
+
+// Access control (enforced by user's vault, not VettID):
+// - User vault subscribes to MessageSpace.<user_guid>.>
+// - User vault only processes messages from services with valid contracts
+// - Invalid/unauthorized messages are discarded
 ```
 
-**Why use MessageSpace?**
-- Reach users who haven't connected yet (service discovery notifications)
-- Leverage VettID's global NATS infrastructure
-- Not required - services can operate entirely on their own NATS
+**Key point:** VettID provides MessageSpace infrastructure, but the **user controls who can reach them**. When a user signs a contract with a service, their vault begins accepting messages from that service's topic. VettID has no role in approving or denying service access - this is entirely user-controlled.
 
 ### 2.5 Handler Manifest
 
