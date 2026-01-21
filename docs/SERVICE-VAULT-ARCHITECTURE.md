@@ -176,6 +176,22 @@ service_id = base58(sha256(public_key)[0:20])
 ```
 This guarantees global uniqueness - the identity IS the key.
 
+**⚠️ Private Key Security:**
+
+The service's Ed25519 signing key is the root of trust for the entire service identity. Compromise of this key means complete service impersonation. Service providers **MUST** secure private keys appropriately:
+
+| Environment | Recommended Approach |
+|-------------|---------------------|
+| **Production** | Hardware Security Module (HSM) or cloud KMS (AWS KMS, GCP Cloud HSM, Azure Key Vault) |
+| **High-value services** | Dedicated HSM with FIPS 140-2 Level 3+ certification |
+| **Startup/MVP** | Cloud KMS at minimum; never store keys in code, config files, or environment variables |
+
+Key management requirements:
+- Keys should never exist in plaintext outside secure hardware
+- Implement key rotation procedures (rotate encryption keys periodically, signing key rotation requires identity migration)
+- Maintain secure backup/recovery procedures
+- Audit all key usage
+
 **Domain Validation (Optional):**
 
 Services can associate a domain with their identity for human-readable verification:
