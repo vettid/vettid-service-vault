@@ -44,98 +44,72 @@ The **Service Vault** enables third-party applications and services to connect w
 
 ### 1.2 Relationship Model
 
-Communication between services and users flows through **two separate NATS environments**:
-
-1. **VettID MessageSpace** (VettID's NATS): Services send messages TO users via MessageSpace
-2. **ServiceSpace** (Service's own NATS): Users send messages TO services via the service's own NATS cluster
-
-This separation ensures services control their own infrastructure for receiving messages while leveraging VettID's MessageSpace for outbound delivery to users.
+Communication between users and services flows through NATS. Services operate standalone by default using their own NATS cluster. Registered services can optionally use VettID's MessageSpace for outbound messages.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           VettID Infrastructure                              │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                      VettID NATS Cluster                             │    │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │    │
-│  │  │   OwnerSpace    │  │  MessageSpace   │  │   Control Plane     │  │    │
-│  │  │  (User ↔ App)   │  │ (Svc → User)    │  │   (Lambda/API)      │  │    │
-│  │  └────────┬────────┘  └────────┬────────┘  └─────────────────────┘  │    │
-│  │           │                    │                                     │    │
-│  └───────────┼────────────────────┼─────────────────────────────────────┘    │
-│              │                    │                                          │
-│              │                    │ Service → User messages                  │
-│              ▼                    ▼ (requests, notifications)                │
-│  ┌──────────────────────┐             ┌──────────────────────┐              │
-│  │  User A OwnerVault   │             │  User N OwnerVault   │              │
-│  │  ┌────────────────┐  │             │  ┌────────────────┐  │              │
-│  │  │ User Data      │  │             │  │ User Data      │  │              │
-│  │  │ Service Secrets│  │             │  │ Service Secrets│  │              │
-│  │  │ (per-service)  │  │             │  │ (per-service)  │  │              │
-│  │  └────────────────┘  │             │  └────────────────┘  │              │
-│  └──────────┬───────────┘             └──────────┬───────────┘              │
-│             │                                    │                           │
-│             │ User → Service messages            │                           │
-│             │ (responses, user-initiated)        │                           │
-│             │                                    │                           │
-└─────────────┼────────────────────────────────────┼───────────────────────────┘
-              │                                    │
-              │         ┌──────────────────────────┘
-              │         │
-              ▼         ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Service Provider Infrastructure                         │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    Service's NATS Cluster                            │    │
-│  │                       (ServiceSpace)                                 │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │  ServiceSpace.<service_id>/                               │    │    │
-│  │  │    fromUser.<user_guid>.>    ← User responses & events      │    │    │
-│  │  │    internal.>                ← Service internal messaging   │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                        │                                     │
-│  ┌─────────────────────────────────────┼───────────────────────────────┐    │
-│  │                        SERVICE VAULT│                                │    │
-│  │  (Controlled entirely by Service Provider)                           │    │
-│  │                                     │                                │    │
-│  │  ┌─────────────────┐  ┌─────────────┴───┐  ┌─────────────────┐      │    │
-│  │  │ Service Identity │  │ NATS Bridge     │  │  Event Router   │      │    │
-│  │  │ (Provider's keys)│  │ (ServiceSpace ↔ │  │                 │      │    │
-│  │  │                  │  │  MessageSpace)  │  │                 │      │    │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘      │    │
-│  │                                                                      │    │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐      │    │
-│  │  │  Contract Mgr   │  │ Handler Engine  │  │  Audit Logger   │      │    │
-│  │  │ (User Contracts)│  │ (Business Logic)│  │                 │      │    │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘      │    │
-│  │                                                                      │    │
-│  │  ┌─────────────────┐                                                │    │
-│  │  │  API Gateway    │                                                │    │
-│  │  │  (Service API)  │                                                │    │
-│  │  └─────────────────┘                                                │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌───────────────────────┐    ┌───────────────────────┐                     │
-│  │   Service Backend     │    │   Service Frontend    │                     │
-│  │   (3rd Party App)     │◄──►│   (Web/Mobile/API)    │                     │
-│  └───────────────────────┘    └───────────────────────┘                     │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────┐     ┌───────────────────────────────────────┐
+│         VETTID INFRASTRUCTURE         │     │      SERVICE PROVIDER INFRASTRUCTURE  │
+│                                       │     │                                       │
+│  ┌─────────────────────────────────┐  │     │  ┌─────────────────────────────────┐  │
+│  │       User Vaults (hosted)      │  │     │  │         Service Vault           │  │
+│  │  ┌───────────┐  ┌───────────┐   │  │     │  │    (self-hosted, autonomous)    │  │
+│  │  │  User A   │  │  User N   │   │  │     │  │                                 │  │
+│  │  │  Vault    │  │  Vault    │   │  │     │  │  ┌─────────┐ ┌─────────┐       │  │
+│  │  │           │  │           │   │  │     │  │  │ Identity│ │ Handler │       │  │
+│  │  │┌─────────┐│  │┌─────────┐│   │  │     │  │  │ (HSM)   │ │ Engine  │       │  │
+│  │  ││ Data    ││  ││ Data    ││   │  │     │  │  └─────────┘ └─────────┘       │  │
+│  │  ││ Secrets ││  ││ Secrets ││   │  │     │  │  ┌─────────┐ ┌─────────┐       │  │
+│  │  │└─────────┘│  │└─────────┘│   │  │     │  │  │Contract │ │  Audit  │       │  │
+│  │  └─────┬─────┘  └─────┬─────┘   │  │     │  │  │ Manager │ │  Log    │       │  │
+│  │        │              │         │  │     │  │  └─────────┘ └─────────┘       │  │
+│  └────────┼──────────────┼─────────┘  │     │  └───────────────┬─────────────────┘  │
+│           │              │            │     │                  │                    │
+│           ▼              ▼            │     │                  ▼                    │
+│  ┌─────────────────────────────────┐  │     │  ┌─────────────────────────────────┐  │
+│  │      VettID NATS Cluster        │  │     │  │     Service's NATS Cluster      │  │
+│  │                                 │  │     │  │        (ServiceSpace)           │  │
+│  │  ┌───────────┐ ┌─────────────┐  │  │     │  │                                 │  │
+│  │  │OwnerSpace │ │MessageSpace │  │  │     │  │  ┌─────────────────────────┐    │  │
+│  │  │(User↔App) │ │(Svc→User)*  │  │◄─┼─────┼─►│  │ ServiceSpace.<svc_id>/  │    │  │
+│  │  └───────────┘ └─────────────┘  │  │     │  │  │   toUser.<user>.*       │    │  │
+│  │                                 │  │     │  │  │   fromUser.<user>.*     │    │  │
+│  └─────────────────────────────────┘  │     │  │  └─────────────────────────┘    │  │
+│                                       │     │  │                                 │  │
+│  * MessageSpace: optional, for        │     │  └─────────────────────────────────┘  │
+│    registered services only           │     │                                       │
+│                                       │     │                                       │
+└───────────────────────────────────────┘     └───────────────────────────────────────┘
+
+Communication Flows:
+━━━━━━━━━━━━━━━━━━━━
+                    ┌──────────────────────────────────────┐
+                    │         NATS MESSAGE LAYER           │
+                    │                                      │
+  User Vault ──────►│  ServiceSpace.<svc>.fromUser.<user>  │──────► Service Vault
+                    │           (User → Service)           │
+                    │                                      │
+  User Vault ◄──────│  ServiceSpace.<svc>.toUser.<user>    │◄────── Service Vault
+                    │           (Service → User)           │
+                    │                                      │
+                    │  ─ ─ ─ OR (if registered) ─ ─ ─ ─   │
+                    │                                      │
+  User Vault ◄──────│  MessageSpace.<user>.fromService.*   │◄────── Service Vault
+                    │    (Service → User via VettID)       │
+                    │                                      │
+                    └──────────────────────────────────────┘
 ```
 
 **Key Principles:**
 
-1. **Two NATS Environments**:
-   - **VettID MessageSpace**: Service sends requests/notifications TO users (service publishes, user vault subscribes)
-   - **Service's ServiceSpace**: Users send responses/events TO service (user vault publishes, service subscribes)
+1. **Services operate standalone by default**: Every service runs its own NATS cluster. No VettID dependency required.
 
-2. **Service Controls Inbound**: The service provider operates their own NATS cluster for receiving messages. This allows independent scaling and full infrastructure control.
+2. **Bidirectional on Service NATS**: For standalone services, both directions (user↔service) flow through the service's NATS cluster.
 
-3. **VettID Controls Outbound Delivery**: Services use VettID's MessageSpace to reach users, ensuring consistent delivery and security policies.
+3. **Optional MessageSpace**: Registered services may use VettID's MessageSpace for outbound delivery to users (useful for reaching users who haven't connected yet).
 
-4. **User Vault Bridges Both**: User vaults connect to both VettID's NATS (to receive from services) and each connected service's NATS (to send to services).
+4. **User Vault connects to each service**: For each contract, user vault establishes a connection to that service's NATS cluster.
+
+5. **User Vault Stores Secrets**: Service-specific user secrets are stored in the user's vault, not the service vault. The service vault only holds connection keys for message encryption.
 
 5. **User Vault Stores Secrets**: Service-specific user secrets are stored in the user's vault, not the service vault. The service vault only holds connection keys for message encryption.
 
