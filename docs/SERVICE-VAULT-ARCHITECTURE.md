@@ -303,11 +303,10 @@ interface RegistryAttestation {
 **VettID Registry Benefits (when registered with VettID):**
 - Listed in VettID Service Directory (user discovery via VettID app)
 - VettID attestation badge shown to users
-- Optional: MessageSpace access (send to users via VettID's NATS infrastructure)
 
 **Key Principles:**
-- Services are fully operational without any registry
-- Registration is always optional and service-initiated
+- Registry registration is optional (for discoverability and trust signals)
+- All services use MessageSpace for service→user communication (user vaults are on VettID infrastructure)
 - Services can register with multiple registries simultaneously
 - No registry controls service identity (identity is key-derived)
 - Users can connect to unregistered services via direct key exchange
