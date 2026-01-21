@@ -29,60 +29,78 @@ The **Service Vault** enables third-party applications and services to securely 
 
 ### 1.2 Relationship Model
 
-The Service Vault operates its own ServiceSpace on the VettID NATS cluster. User vaults communicate with services through this ServiceSpace, enabling asynchronous message-based communication without requiring persistent network connections.
+Communication between services and users flows through **two separate NATS environments**:
+
+1. **VettID MessageSpace** (VettID's NATS): Services send messages TO users via MessageSpace
+2. **ServiceSpace** (Service's own NATS): Users send messages TO services via the service's own NATS cluster
+
+This separation ensures services control their own infrastructure for receiving messages while leveraging VettID's MessageSpace for outbound delivery to users.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           VettID Infrastructure                              │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         NATS Cluster                                 │    │
+│  │                      VettID NATS Cluster                             │    │
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │    │
-│  │  │   OwnerSpace    │  │  ServiceSpace   │  │   Control Plane     │  │    │
-│  │  │  (User ↔ App)   │  │ (User ↔ Service)│  │   (Lambda/API)      │  │    │
+│  │  │   OwnerSpace    │  │  MessageSpace   │  │   Control Plane     │  │    │
+│  │  │  (User ↔ App)   │  │ (Svc → User)    │  │   (Lambda/API)      │  │    │
 │  │  └────────┬────────┘  └────────┬────────┘  └─────────────────────┘  │    │
 │  │           │                    │                                     │    │
 │  └───────────┼────────────────────┼─────────────────────────────────────┘    │
 │              │                    │                                          │
-│              │    ┌───────────────┴───────────────┐                          │
-│              │    │                               │                          │
-│              ▼    ▼                               ▼                          │
+│              │                    │ Service → User messages                  │
+│              ▼                    ▼ (requests, notifications)                │
 │  ┌──────────────────────┐             ┌──────────────────────┐              │
 │  │  User A OwnerVault   │             │  User N OwnerVault   │              │
 │  │  ┌────────────────┐  │             │  ┌────────────────┐  │              │
 │  │  │ User Data      │  │             │  │ User Data      │  │              │
-│  │  │ Service Secrets│◄─┼─────────────┼──│ Service Secrets│  │              │
+│  │  │ Service Secrets│  │             │  │ Service Secrets│  │              │
 │  │  │ (per-service)  │  │             │  │ (per-service)  │  │              │
 │  │  └────────────────┘  │             │  └────────────────┘  │              │
-│  └──────────────────────┘             └──────────────────────┘              │
-│              │                               │                               │
-│              │      NATS: Secure Drop-Box    │                               │
-│              │      (No persistent connections)                              │
-│              │                               │                               │
-└──────────────┼───────────────────────────────┼───────────────────────────────┘
-               │                               │
-               │    ServiceSpace.<svc_guid>    │
-               │    (Messages queued until     │
-               │     recipient picks up)       │
-               │                               │
-               ▼                               ▼
+│  └──────────┬───────────┘             └──────────┬───────────┘              │
+│             │                                    │                           │
+│             │ User → Service messages            │                           │
+│             │ (responses, user-initiated)        │                           │
+│             │                                    │                           │
+└─────────────┼────────────────────────────────────┼───────────────────────────┘
+              │                                    │
+              │         ┌──────────────────────────┘
+              │         │
+              ▼         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                      Service Provider Infrastructure                         │
 │                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────┐     │
-│  │                        SERVICE VAULT                                │     │
-│  │  (Controlled entirely by Service Provider)                          │     │
-│  │                                                                      │     │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │     │
-│  │  │ Service Identity │  │ Contract Mgr    │  │  Event Router   │     │     │
-│  │  │ (Provider's keys)│  │ (User Contracts)│  │                 │     │     │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘     │     │
-│  │                                                                      │     │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │     │
-│  │  │  API Gateway    │  │ Handler Engine  │  │  Audit Logger   │     │     │
-│  │  │  (Service API)  │  │ (Business Logic)│  │                 │     │     │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘     │     │
-│  └────────────────────────────────────────────────────────────────────┘     │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    Service's NATS Cluster                            │    │
+│  │                       (ServiceSpace)                                 │    │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
+│  │  │  ServiceSpace.<service_guid>/                               │    │    │
+│  │  │    fromUser.<user_guid>.>    ← User responses & events      │    │    │
+│  │  │    internal.>                ← Service internal messaging   │    │    │
+│  │  └─────────────────────────────────────────────────────────────┘    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                        │                                     │
+│  ┌─────────────────────────────────────┼───────────────────────────────┐    │
+│  │                        SERVICE VAULT│                                │    │
+│  │  (Controlled entirely by Service Provider)                           │    │
+│  │                                     │                                │    │
+│  │  ┌─────────────────┐  ┌─────────────┴───┐  ┌─────────────────┐      │    │
+│  │  │ Service Identity │  │ NATS Bridge     │  │  Event Router   │      │    │
+│  │  │ (Provider's keys)│  │ (ServiceSpace ↔ │  │                 │      │    │
+│  │  │                  │  │  MessageSpace)  │  │                 │      │    │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘      │    │
+│  │                                                                      │    │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐      │    │
+│  │  │  Contract Mgr   │  │ Handler Engine  │  │  Audit Logger   │      │    │
+│  │  │ (User Contracts)│  │ (Business Logic)│  │                 │      │    │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘      │    │
+│  │                                                                      │    │
+│  │  ┌─────────────────┐                                                │    │
+│  │  │  API Gateway    │                                                │    │
+│  │  │  (Service API)  │                                                │    │
+│  │  └─────────────────┘                                                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌───────────────────────┐    ┌───────────────────────┐                     │
 │  │   Service Backend     │    │   Service Frontend    │                     │
@@ -93,9 +111,18 @@ The Service Vault operates its own ServiceSpace on the VettID NATS cluster. User
 ```
 
 **Key Principles:**
-1. **NATS as Drop-Box**: Messages are queued in NATS until the recipient picks them up. No persistent connections required between user vaults and service vaults.
-2. **User Vault Stores Secrets**: Service-specific user secrets are stored in the user's vault, not the service vault. The service vault only holds connection keys for message encryption.
-3. **Service Controls Everything**: The service provider generates and manages all their own keys, infrastructure, and deployment.
+
+1. **Two NATS Environments**:
+   - **VettID MessageSpace**: Service sends requests/notifications TO users (service publishes, user vault subscribes)
+   - **Service's ServiceSpace**: Users send responses/events TO service (user vault publishes, service subscribes)
+
+2. **Service Controls Inbound**: The service provider operates their own NATS cluster for receiving messages. This allows independent scaling and full infrastructure control.
+
+3. **VettID Controls Outbound Delivery**: Services use VettID's MessageSpace to reach users, ensuring consistent delivery and security policies.
+
+4. **User Vault Bridges Both**: User vaults connect to both VettID's NATS (to receive from services) and each connected service's NATS (to send to services).
+
+5. **User Vault Stores Secrets**: Service-specific user secrets are stored in the user's vault, not the service vault. The service vault only holds connection keys for message encryption.
 
 ---
 
@@ -169,10 +196,12 @@ VettID provides a **Service Registry** where services register their details. Ve
 
 ### 2.3 Service Authentication to NATS
 
-Services authenticate to NATS using the nkeys/JWT pattern. The service signs its connection request with its private key, proving ownership of the registered public key.
+Services connect to **two NATS environments** with different credentials:
+
+#### VettID NATS (for sending to users via MessageSpace)
 
 ```typescript
-// Service NATS JWT Structure (issued by VettID after registration approval)
+// Service JWT for VettID NATS (issued by VettID after registration approval)
 {
   "aud": "NATS",
   "exp": <timestamp + 30 days>,
@@ -183,22 +212,50 @@ Services authenticate to NATS using the nkeys/JWT pattern. The service signs its
   "nats": {
     "pub": {
       "allow": [
-        "ServiceSpace.<service_guid>.>",              // Own namespace
-        "ServiceSpace.<service_guid>.forUser.*.>"    // Messages to users
+        "MessageSpace.*.fromService.<service_guid>.>"  // Send to any user
       ]
     },
     "sub": {
       "allow": [
-        "ServiceSpace.<service_guid>.>",
-        "ServiceSpace.<service_guid>.fromUser.*.>",  // Messages from users
-        "Control.service.<service_guid>.>"           // Control commands
+        "Control.service.<service_guid>.>",           // Control commands from VettID
+        "Directory.services.<service_guid>.>"         // Own directory entry
       ]
     },
-    "subs": 10000,      // Higher limit for multi-user
-    "data": 50000000,   // 50 MB/sec for scale
+    "subs": 100,
+    "data": 50000000,   // 50 MB/sec
     "payload": 1048576  // 1 MB max message
   },
   "sub": <service_account_public_key>
+}
+```
+
+#### Service's Own NATS (for receiving from users via ServiceSpace)
+
+The service operates their own NATS cluster and issues credentials to connected users:
+
+```typescript
+// User JWT for Service's NATS (issued by service to connected user)
+{
+  "aud": "NATS",
+  "exp": <timestamp + contract_duration>,
+  "iat": <timestamp>,
+  "iss": <service_operator_public_key>,  // Service is the operator
+  "jti": <unique_id>,
+  "name": "user:<user_guid>",
+  "nats": {
+    "pub": {
+      "allow": [
+        "ServiceSpace.<service_guid>.fromUser.<user_guid>.>"  // User's response topics
+      ]
+    },
+    "sub": {
+      "allow": []  // Users don't subscribe to service NATS (they use VettID MessageSpace)
+    },
+    "subs": 10,
+    "data": 10000000,   // 10 MB/sec per user
+    "payload": 1048576  // 1 MB max message
+  },
+  "sub": <user_connection_public_key>  // User's key for this service
 }
 ```
 
@@ -422,102 +479,146 @@ Custom capabilities can be defined by services and must be approved during regis
 
 ## 4. NATS Topic Architecture
 
-### 4.1 ServiceSpace Namespace
+### 4.1 Dual-NATS Model
 
-All user-service communication flows through the service's **ServiceSpace**. NATS acts as a secure drop-box - messages are queued until the recipient retrieves them.
+Communication between services and users spans **two separate NATS environments**:
 
-```
-NATS Topic Hierarchy:
-│
-├── OwnerSpace.<user_guid>/              # Existing: User ↔ User App
-│   ├── forVault.>
-│   ├── forApp.>
-│   └── ...
-│
-├── ServiceSpace.<service_guid>/          # Service's namespace
-│   │
-│   ├── fromUser.<user_guid>/             # User Vault → Service
-│   │   ├── auth.response.<event_id>      # Auth responses
-│   │   ├── authz.response.<event_id>     # Authorization responses
-│   │   ├── data.response.<event_id>      # Data responses
-│   │   ├── payment.response.<event_id>   # Payment confirmations
-│   │   ├── call.signal.<session_id>      # Call signaling
-│   │   └── events.>                      # User-initiated events
-│   │
-│   ├── forUser.<user_guid>/              # Service → User Vault
-│   │   ├── auth.request                  # Authentication requests
-│   │   ├── authz.request                 # Authorization requests
-│   │   ├── data.request                  # Data requests
-│   │   ├── payment.request               # Payment requests
-│   │   ├── call.initiate                 # Initiate call
-│   │   ├── call.signal.<session_id>      # Call signaling
-│   │   └── notify.>                      # Notifications
-│   │
-│   ├── directory/                        # Service discovery
-│   │   ├── manifest                      # Handler manifest
-│   │   └── status                        # Service health/availability
-│   │
-│   └── internal/                         # Service-internal (not for users)
-│       ├── control.>
-│       ├── health.>
-│       └── metrics.>
-│
-├── Control/                              # Existing + Extended
-│   ├── global.*
-│   ├── enclave.*
-│   ├── user.*
-│   └── service.<service_guid>.*          # Service control
-│
-└── Directory/                            # VettID Service Directory
-    ├── services.list                     # List all approved services
-    ├── services.<service_guid>.info      # Service public info
-    └── services.search                   # Search services
-```
-
-### 4.2 Message Flow: Request with Timeout & Offline Support
-
-Services can set request timeouts and support offline users:
+| NATS Environment | Operator | Purpose | Direction |
+|------------------|----------|---------|-----------|
+| **VettID NATS** (MessageSpace) | VettID | Service sends TO users | Service → User |
+| **Service NATS** (ServiceSpace) | Service Provider | Users send TO service | User → Service |
 
 ```
-┌─────────────────┐                                   ┌─────────────────┐
-│  Service Vault  │                                   │   User Vault    │
-└────────┬────────┘                                   └────────┬────────┘
-         │                                                     │
-         │ 1. Publish request with timeout                     │
-         │ ───────────────────────────────────────────────────►│
-         │    Topic: ServiceSpace.<svc>.forUser.<user>.        │
-         │           auth.request                              │
-         │    Payload: {                                       │
-         │      event_id: "uuid",                              │
-         │      event_type: "auth.request",                    │
-         │      timestamp: "ISO8601",                          │
-         │      expires_at: "ISO8601",    // Service-defined   │
-         │      offline_grace: 300,       // 5 min after online│
-         │      encrypted_payload: {...}                       │
-         │    }                                                │
-         │                                                     │
-         │    (Message queued in NATS JetStream)               │
-         │                                                     │
-         │                    ─────────────────────────────    │
-         │                    User may be offline              │
-         │                    Message waits in queue           │
-         │                    ─────────────────────────────    │
-         │                                                     │
-         │                    2. User comes online             │
-         │                       Vault retrieves queued msgs   │
-         │                                                     │
-         │                    3. Check expiry:                 │
-         │                       - If past expires_at:         │
-         │                         discard (or notify expired) │
-         │                       - If within offline_grace     │
-         │                         after coming online:        │
-         │                         process normally            │
-         │                                                     │
-         │                    4. Process & respond             │
-         │◄─────────────────────────────────────────────────── │
-         │    Topic: ServiceSpace.<svc>.fromUser.<user>.       │
-         │           auth.response.<event_id>                  │
-         │                                                     │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         VettID NATS Cluster                                  │
+│                                                                              │
+│  NATS Topics (VettID operated):                                             │
+│  │                                                                           │
+│  ├── OwnerSpace.<user_guid>/              # Existing: User ↔ User App       │
+│  │   ├── forVault.>                                                         │
+│  │   ├── forApp.>                                                           │
+│  │   └── ...                                                                │
+│  │                                                                           │
+│  ├── MessageSpace.<user_guid>/            # Service → User communication    │
+│  │   └── fromService.<service_guid>/      # Messages from specific service  │
+│  │       ├── auth.request                 # Authentication requests         │
+│  │       ├── authz.request                # Authorization requests          │
+│  │       ├── data.request                 # Data requests                   │
+│  │       ├── payment.request              # Payment requests                │
+│  │       ├── call.initiate                # Initiate call                   │
+│  │       ├── call.signal.<session_id>     # Call signaling (svc → user)    │
+│  │       └── notify.>                     # Notifications                   │
+│  │                                                                           │
+│  ├── Control/                             # Existing control plane          │
+│  │   ├── global.*                                                           │
+│  │   ├── enclave.*                                                          │
+│  │   └── user.*                                                             │
+│  │                                                                           │
+│  └── Directory/                           # VettID Service Directory        │
+│      ├── services.list                    # List all approved services      │
+│      ├── services.<service_guid>.info     # Service public info             │
+│      └── services.search                  # Search services                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Service Provider's NATS Cluster                           │
+│                       (Operated by Service Provider)                         │
+│                                                                              │
+│  NATS Topics (Service operated):                                            │
+│  │                                                                           │
+│  ├── ServiceSpace.<service_guid>/         # Service's namespace             │
+│  │   │                                                                       │
+│  │   ├── fromUser.<user_guid>/            # User Vault → Service            │
+│  │   │   ├── auth.response.<event_id>     # Auth responses                  │
+│  │   │   ├── authz.response.<event_id>    # Authorization responses         │
+│  │   │   ├── data.response.<event_id>     # Data responses                  │
+│  │   │   ├── payment.response.<event_id>  # Payment confirmations           │
+│  │   │   ├── call.signal.<session_id>     # Call signaling (user → svc)    │
+│  │   │   └── events.>                     # User-initiated events           │
+│  │   │                                                                       │
+│  │   ├── directory/                       # Service discovery               │
+│  │   │   ├── manifest                     # Handler manifest                │
+│  │   │   └── status                       # Service health/availability     │
+│  │   │                                                                       │
+│  │   └── internal/                        # Service-internal messaging      │
+│  │       ├── control.>                                                      │
+│  │       ├── health.>                                                       │
+│  │       └── metrics.>                                                      │
+│  │                                                                           │
+│  └── (Service can add custom internal topics as needed)                     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 User Vault NATS Connections
+
+Each user vault maintains connections to:
+1. **VettID NATS** - Always connected (for OwnerSpace and receiving from MessageSpace)
+2. **Service NATS** - Connected per service contract (for sending to ServiceSpace)
+
+```typescript
+// User vault connection configuration per service contract
+interface ServiceNATSConnection {
+  service_guid: string;
+  nats_endpoint: string;           // Service's NATS cluster endpoint
+  nats_credentials: {
+    account_jwt: string;           // Issued by service for this user
+    user_jwt: string;
+    user_seed: string;             // User's nkey for this service
+  };
+  connection_key: string;          // X25519 key for message encryption
+  topics: {
+    publish_prefix: string;        // ServiceSpace.<svc>.fromUser.<user>
+  };
+}
+```
+
+### 4.3 Message Flow: Request with Timeout & Offline Support
+
+Services can set request timeouts and support offline users. Note the different NATS clusters for each direction:
+
+```
+┌─────────────────┐                                        ┌─────────────────┐
+│  Service Vault  │                                        │   User Vault    │
+└────────┬────────┘                                        └────────┬────────┘
+         │                                                          │
+         │ 1. Publish request (via VettID MessageSpace)             │
+         │ ────────────────────────────────────────────────────────►│
+         │    NATS: VettID Cluster                                  │
+         │    Topic: MessageSpace.<user>.fromService.<svc>.         │
+         │           auth.request                                   │
+         │    Payload: {                                            │
+         │      event_id: "uuid",                                   │
+         │      event_type: "auth.request",                         │
+         │      timestamp: "ISO8601",                               │
+         │      expires_at: "ISO8601",    // Service-defined        │
+         │      offline_grace: 300,       // 5 min after online     │
+         │      service_nats_endpoint: "nats://svc.example.com",    │
+         │      encrypted_payload: {...}                            │
+         │    }                                                     │
+         │                                                          │
+         │    (Message queued in VettID JetStream)                  │
+         │                                                          │
+         │                         ─────────────────────────────    │
+         │                         User may be offline              │
+         │                         Message waits in VettID queue    │
+         │                         ─────────────────────────────    │
+         │                                                          │
+         │                         2. User comes online             │
+         │                            Vault retrieves from VettID   │
+         │                                                          │
+         │                         3. Check expiry:                 │
+         │                            - If past expires_at: discard │
+         │                            - If within offline_grace:    │
+         │                              process normally            │
+         │                                                          │
+         │                         4. Process & respond             │
+         │◄──────────────────────────────────────────────────────── │
+         │    NATS: Service's Cluster                               │
+         │    Topic: ServiceSpace.<svc>.fromUser.<user>.            │
+         │           auth.response.<event_id>                       │
+         │                                                          │
 ```
 
 ### 4.3 Message Encryption
@@ -552,49 +653,69 @@ interface EncryptedMessage {
 
 ### 5.1 Deployment Model
 
-Service Vaults are **entirely controlled by the service provider**. No Nitro Enclave is required since the service vault doesn't hold high-value secrets like cryptocurrency private keys. User-specific secrets are stored in user vaults, not service vaults.
+Service Vaults are **entirely controlled by the service provider**, including their own NATS cluster for receiving messages from users. No Nitro Enclave is required since the service vault doesn't hold high-value secrets like cryptocurrency private keys. User-specific secrets are stored in user vaults, not service vaults.
 
 ```
 Service Vault Deployment (Provider-Controlled):
-┌──────────────────────────────────────────────────────────────┐
-│                 Service Provider Infrastructure               │
-│                                                               │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │  Service Vault (Container/VM/K8s)                       │ │
-│  │                                                          │ │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │ │
-│  │  │ NATS Client  │  │ Handler Eng. │  │ Service API  │   │ │
-│  │  │              │  │              │  │              │   │ │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘   │ │
-│  │                                                          │ │
-│  └────────────────────────────┬─────────────────────────────┘ │
-│                               │                               │
-│  ┌────────────────────────────┼────────────────────────────┐ │
-│  │                            │                             │ │
-│  │  ┌─────────────────┐  ┌────┴────┐  ┌─────────────────┐  │ │
-│  │  │ Hardened DB     │  │ Key     │  │ Audit Log       │  │ │
-│  │  │ (Connection     │  │ Store   │  │ (Immutable)     │  │ │
-│  │  │  contracts,     │  │ (HSM or │  │                 │  │ │
-│  │  │  state)         │  │  KMS)   │  │                 │  │ │
-│  │  └─────────────────┘  └─────────┘  └─────────────────┘  │ │
-│  │                                                          │ │
-│  │  Security Layer:                                         │ │
-│  │  - Encrypted at rest (provider's choice)                 │ │
-│  │  - TLS for all connections                               │ │
-│  │  - Service key in HSM/KMS (recommended)                  │ │
-│  │  - Connection keys in hardened DB                        │ │
-│  │                                                          │ │
-│  └──────────────────────────────────────────────────────────┘ │
-│                               │                               │
-│                          TLS/mTLS                             │
-│                      (Outbound only)                          │
-└───────────────────────────────┼───────────────────────────────┘
-                                │
-                                ▼
-                     ┌──────────────────┐
-                     │  VettID NATS     │
-                     │  Cluster         │
-                     └──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                      Service Provider Infrastructure                          │
+│                                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │              Service's NATS Cluster (ServiceSpace)                       │ │
+│  │                                                                          │ │
+│  │  ┌────────────────────────────────────────────────────────────────────┐ │ │
+│  │  │  ServiceSpace.<service_guid>/                                      │ │ │
+│  │  │    fromUser.*.>     ← Receives messages from connected users       │ │ │
+│  │  │    internal.>       ← Service internal messaging                   │ │ │
+│  │  └────────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                          │ │
+│  │  (Provider operates: can be NATS cluster, Synadia Cloud, etc.)          │ │
+│  └───────────────────────────────────┬─────────────────────────────────────┘ │
+│                                      │                                        │
+│  ┌───────────────────────────────────┼───────────────────────────────────┐   │
+│  │                      SERVICE VAULT│                                    │   │
+│  │                                   │                                    │   │
+│  │  ┌──────────────┐  ┌──────────────┴──┐  ┌──────────────┐              │   │
+│  │  │ ServiceSpace │  │ VettID NATS     │  │ Handler      │              │   │
+│  │  │ Subscriber   │  │ Publisher       │  │ Engine       │              │   │
+│  │  │ (own NATS)   │  │ (MessageSpace)  │  │              │              │   │
+│  │  └──────────────┘  └─────────────────┘  └──────────────┘              │   │
+│  │                                                                        │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                 │   │
+│  │  │ Contract Mgr │  │ Service API  │  │ Audit Logger │                 │   │
+│  │  │              │  │              │  │              │                 │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘                 │   │
+│  └───────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                        │
+│  ┌───────────────────────────────────┼───────────────────────────────────┐   │
+│  │                    Storage Layer  │                                    │   │
+│  │  ┌─────────────────┐  ┌──────────┴──┐  ┌─────────────────┐            │   │
+│  │  │ Hardened DB     │  │ Key Store   │  │ Audit Log       │            │   │
+│  │  │ (Contracts,     │  │ (HSM/KMS)   │  │ (Immutable)     │            │   │
+│  │  │  User NATS creds│  │             │  │                 │            │   │
+│  │  │  state)         │  │             │  │                 │            │   │
+│  │  └─────────────────┘  └─────────────┘  └─────────────────┘            │   │
+│  └───────────────────────────────────────────────────────────────────────┘   │
+│                                                                               │
+│  Security Layer:                                                              │
+│  - Service's NATS with TLS + authentication                                  │
+│  - Service key in HSM/KMS                                                    │
+│  - Encrypted database for contracts and user credentials                     │
+│  - Audit logging for all operations                                          │
+│                                                                               │
+└───────────────────────────────────────┬───────────────────────────────────────┘
+                                        │
+                                   TLS/mTLS
+                            (Outbound to VettID)
+                                        │
+                                        ▼
+                             ┌──────────────────┐
+                             │  VettID NATS     │
+                             │  (MessageSpace)  │
+                             │                  │
+                             │ Service publishes│
+                             │ TO users here    │
+                             └──────────────────┘
 ```
 
 **Security Recommendations for Service Vaults:**
