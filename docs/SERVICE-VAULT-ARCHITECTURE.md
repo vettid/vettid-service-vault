@@ -44,7 +44,9 @@ The **Service Vault** enables third-party applications and services to connect w
 
 ### 1.2 Relationship Model
 
-Communication between users and services flows through NATS. Services operate standalone by default using their own NATS cluster. Registered services can optionally use VettID's MessageSpace for outbound messages.
+Communication between users and services flows through NATS using a split model:
+- **Service → User**: Via VettID's MessageSpace (required)
+- **User → Service**: Via Service's own NATS cluster (ServiceSpace)
 
 ```
 ┌───────────────────────────────────────┐     ┌───────────────────────────────────────┐
@@ -70,44 +72,52 @@ Communication between users and services flows through NATS. Services operate st
 │  │                                 │  │     │  │        (ServiceSpace)           │  │
 │  │  ┌───────────┐ ┌─────────────┐  │  │     │  │                                 │  │
 │  │  │OwnerSpace │ │MessageSpace │  │  │     │  │  ┌─────────────────────────┐    │  │
-│  │  │(User↔App) │ │(Svc→User)*  │  │◄─┼─────┼─►│  │ ServiceSpace.<svc_id>/  │    │  │
-│  │  └───────────┘ └─────────────┘  │  │     │  │  │   toUser.<user>.*       │    │  │
-│  │                                 │  │     │  │  │   fromUser.<user>.*     │    │  │
+│  │  │(User↔App) │ │(Svc→User)   │  │◄─┼─────┼─►│  │ ServiceSpace.<svc_id>/  │    │  │
+│  │  └───────────┘ └─────────────┘  │  │     │  │  │   fromUser.<user>.*     │    │  │
+│  │                                 │  │     │  │  │   toUser.* (setup only) │    │  │
 │  └─────────────────────────────────┘  │     │  │  └─────────────────────────┘    │  │
 │                                       │     │  │                                 │  │
-│  * MessageSpace: optional, for        │     │  └─────────────────────────────────┘  │
-│    registered services only           │     │                                       │
+│                                       │     │  └─────────────────────────────────┘  │
+│                                       │     │                                       │
 │                                       │     │                                       │
 └───────────────────────────────────────┘     └───────────────────────────────────────┘
 
 Communication Flows:
 ━━━━━━━━━━━━━━━━━━━━
-                    ┌──────────────────────────────────────┐
-                    │         NATS MESSAGE LAYER           │
-                    │                                      │
-  User Vault ──────►│  ServiceSpace.<svc>.fromUser.<user>  │──────► Service Vault
-                    │           (User → Service)           │
-                    │                                      │
-  User Vault ◄──────│  ServiceSpace.<svc>.toUser.<user>    │◄────── Service Vault
-                    │           (Service → User)           │
-                    │                                      │
-                    │  ─ ─ ─ OR (if registered) ─ ─ ─ ─   │
-                    │                                      │
-  User Vault ◄──────│  MessageSpace.<user>.fromService.*   │◄────── Service Vault
-                    │    (Service → User via VettID)       │
-                    │                                      │
-                    └──────────────────────────────────────┘
+
+DURING CONNECTION SETUP (before contract exists):
+┌──────────────────────────────────────────────────────────────────────────┐
+│  User Vault ◄────► Service NATS (ServiceSpace) ◄────► Service Vault     │
+│                                                                          │
+│  Bidirectional on Service NATS allows:                                   │
+│  - User to fetch contract offerings                                      │
+│  - Contract negotiation and signing                                      │
+│  - Key exchange                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+AFTER CONTRACT ESTABLISHED (normal operation):
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  User Vault ──────► ServiceSpace.<svc>.fromUser.<user> ──────► Service   │
+│                          (User → Service)                                │
+│                     via Service's NATS cluster                           │
+│                                                                          │
+│  User Vault ◄────── MessageSpace.<user>.fromService.<svc> ◄────── Service│
+│                          (Service → User)                                │
+│                     via VettID's NATS cluster                            │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key Principles:**
 
-1. **Services operate standalone by default**: Every service runs its own NATS cluster. No VettID dependency required.
+1. **Service → User via MessageSpace**: All service-to-user communication flows through VettID's MessageSpace. This is required, not optional.
 
-2. **Bidirectional on Service NATS**: For standalone services, both directions (user↔service) flow through the service's NATS cluster.
+2. **User → Service via ServiceSpace**: All user-to-service communication flows through the service's own NATS cluster.
 
-3. **Optional MessageSpace**: Registered services may use VettID's MessageSpace for outbound delivery to users (useful for reaching users who haven't connected yet).
+3. **Bidirectional ServiceSpace during setup only**: Before a contract exists, the service's NATS handles both directions to allow contract negotiation. Once connected, service→user switches to MessageSpace.
 
-4. **User Vault connects to each service**: For each contract, user vault establishes a connection to that service's NATS cluster.
+4. **User Vault connects to each service**: For each contract, user vault establishes a connection to that service's NATS cluster for sending messages.
 
 5. **User Vault Stores Secrets**: Service-specific user secrets are stored in the user's vault, not the service vault. The service vault only holds connection keys for message encryption.
 
