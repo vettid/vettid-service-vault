@@ -6,9 +6,10 @@ The **Service Vault** enables third-party applications and services to securely 
 
 - **Secure API integration** for organizational services
 - **Scalable multi-user support** (one Service Vault handles many users)
-- **Event-driven communication** using the established NATS infrastructure
+- **Event-driven communication** using NATS as a secure message drop-box
 - **Zero-knowledge authentication** - services can verify user identity without accessing user credentials
-- **Fine-grained authorization** - users explicitly grant services specific capabilities
+- **User-controlled authorization** - users explicitly grant services specific capabilities via Connection Contracts
+- **User-centric data model** - services store user-specific secrets in the user's vault, not in the service vault
 
 ---
 
@@ -18,60 +19,83 @@ The **Service Vault** enables third-party applications and services to securely 
 
 | Term | Description |
 |------|-------------|
-| **Service Vault** | A vault deployed by a 3rd party organization to integrate their service with VettID |
+| **Service Vault** | A vault deployed and controlled by a 3rd party organization to integrate their service with VettID |
 | **Service Provider** | The organization operating the Service Vault |
 | **OwnerVault** | The user's personal vault (existing VettID architecture) |
 | **Service Connection** | An authorized relationship between a user and a service |
-| **Capability Grant** | A specific permission granted by a user to a service |
-| **Service Token** | A cryptographic token proving a service's identity |
+| **Connection Contract** | The agreement defining what capabilities a user grants to a service |
+| **Service Registry** | VettID's directory of approved services (requires VettID approval) |
+| **Service Directory** | User-facing catalog for discovering and connecting to services |
 
 ### 1.2 Relationship Model
 
+The Service Vault operates its own ServiceSpace on the VettID NATS cluster. User vaults communicate with services through this ServiceSpace, enabling asynchronous message-based communication without requiring persistent network connections.
+
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           VettID Infrastructure                          │
-│  ┌───────────────────┐                      ┌───────────────────┐       │
-│  │    NATS Cluster   │◄────────────────────►│   Control Plane   │       │
-│  │   (OwnerSpace)    │                      │    (Lambda/API)   │       │
-│  │  (ServiceSpace)   │                      │                   │       │
-│  └─────────┬─────────┘                      └───────────────────┘       │
-│            │                                                             │
-│     ┌──────┴──────┬───────────────────────────────────┐                 │
-│     │             │                                   │                 │
-│     ▼             ▼                                   ▼                 │
-│  ┌──────┐     ┌──────┐                          ┌──────────┐           │
-│  │User A│     │User B│         ...              │  User N  │           │
-│  │Vault │     │Vault │                          │  Vault   │           │
-│  └──┬───┘     └──┬───┘                          └────┬─────┘           │
-│     │            │                                   │                 │
-└─────┼────────────┼───────────────────────────────────┼─────────────────┘
-      │            │                                   │
-      │    Service Connections (Authorized)            │
-      │            │                                   │
-      ▼            ▼                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      Service Provider Infrastructure                     │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                        SERVICE VAULT                              │   │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐   │   │
-│  │  │ Service Identity │  │ Connection Mgr  │  │  Event Router   │   │   │
-│  │  │   & Auth Keys   │  │  (User Grants)  │  │                 │   │   │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘   │   │
-│  │                                                                   │   │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐   │   │
-│  │  │  API Gateway    │  │ Handler Engine  │  │  Audit Logger   │   │   │
-│  │  │  (Service API)  │  │ (Business Logic)│  │                 │   │   │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘   │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-│  ┌───────────────────────┐    ┌───────────────────────┐                 │
-│  │   Service Backend     │    │   Service Frontend    │                 │
-│  │   (3rd Party App)     │◄──►│   (Web/Mobile/API)    │                 │
-│  └───────────────────────┘    └───────────────────────┘                 │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           VettID Infrastructure                              │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                         NATS Cluster                                 │    │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │    │
+│  │  │   OwnerSpace    │  │  ServiceSpace   │  │   Control Plane     │  │    │
+│  │  │  (User ↔ App)   │  │ (User ↔ Service)│  │   (Lambda/API)      │  │    │
+│  │  └────────┬────────┘  └────────┬────────┘  └─────────────────────┘  │    │
+│  │           │                    │                                     │    │
+│  └───────────┼────────────────────┼─────────────────────────────────────┘    │
+│              │                    │                                          │
+│              │    ┌───────────────┴───────────────┐                          │
+│              │    │                               │                          │
+│              ▼    ▼                               ▼                          │
+│  ┌──────────────────────┐             ┌──────────────────────┐              │
+│  │  User A OwnerVault   │             │  User N OwnerVault   │              │
+│  │  ┌────────────────┐  │             │  ┌────────────────┐  │              │
+│  │  │ User Data      │  │             │  │ User Data      │  │              │
+│  │  │ Service Secrets│◄─┼─────────────┼──│ Service Secrets│  │              │
+│  │  │ (per-service)  │  │             │  │ (per-service)  │  │              │
+│  │  └────────────────┘  │             │  └────────────────┘  │              │
+│  └──────────────────────┘             └──────────────────────┘              │
+│              │                               │                               │
+│              │      NATS: Secure Drop-Box    │                               │
+│              │      (No persistent connections)                              │
+│              │                               │                               │
+└──────────────┼───────────────────────────────┼───────────────────────────────┘
+               │                               │
+               │    ServiceSpace.<svc_guid>    │
+               │    (Messages queued until     │
+               │     recipient picks up)       │
+               │                               │
+               ▼                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Service Provider Infrastructure                         │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │                        SERVICE VAULT                                │     │
+│  │  (Controlled entirely by Service Provider)                          │     │
+│  │                                                                      │     │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │     │
+│  │  │ Service Identity │  │ Contract Mgr    │  │  Event Router   │     │     │
+│  │  │ (Provider's keys)│  │ (User Contracts)│  │                 │     │     │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘     │     │
+│  │                                                                      │     │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │     │
+│  │  │  API Gateway    │  │ Handler Engine  │  │  Audit Logger   │     │     │
+│  │  │  (Service API)  │  │ (Business Logic)│  │                 │     │     │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘     │     │
+│  └────────────────────────────────────────────────────────────────────┘     │
+│                                                                              │
+│  ┌───────────────────────┐    ┌───────────────────────┐                     │
+│  │   Service Backend     │    │   Service Frontend    │                     │
+│  │   (3rd Party App)     │◄──►│   (Web/Mobile/API)    │                     │
+│  └───────────────────────┘    └───────────────────────┘                     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Principles:**
+1. **NATS as Drop-Box**: Messages are queued in NATS until the recipient picks them up. No persistent connections required between user vaults and service vaults.
+2. **User Vault Stores Secrets**: Service-specific user secrets are stored in the user's vault, not the service vault. The service vault only holds connection keys for message encryption.
+3. **Service Controls Everything**: The service provider generates and manages all their own keys, infrastructure, and deployment.
 
 ---
 
@@ -79,59 +103,76 @@ The **Service Vault** enables third-party applications and services to securely 
 
 ### 2.1 Service Identity
 
-Each Service Vault has a unique cryptographic identity, distinct from user identities:
+Each Service Vault has a unique cryptographic identity **generated and controlled by the service provider**:
 
 ```
 Service Identity Structure:
-├── service_guid: UUID (globally unique service identifier)
+├── service_guid: UUID (globally unique, assigned by VettID registry)
 ├── organization_id: string (registered organization)
 ├── service_name: string (human-readable)
-├── service_type: enum (AUTHENTICATOR | AUTHORIZER | DATA_PROVIDER | INTEGRATION)
-├── public_key: Ed25519 public key (for signature verification)
-├── encryption_key: X25519 public key (for key exchange)
+├── service_type: enum (AUTHENTICATOR | AUTHORIZER | DATA_PROVIDER | INTEGRATION | SUPPORT | PAYMENT)
+├── public_key: Ed25519 public key (provider-generated, registered with VettID)
+├── encryption_key: X25519 public key (provider-generated, for key exchange)
 ├── nats_account_id: string (NATS account for service)
-└── registration_attestation: object (proof of legitimate registration)
+├── service_directory_entry: object (public listing information)
+└── handler_manifest: object (supported event types/capabilities)
 ```
 
 ### 2.2 Service Registration Flow
 
-Services must be registered with VettID before deployment:
+VettID provides a **Service Registry** where services register their details. VettID may require approval before a service can connect to users. **The service provider controls all their own keys and infrastructure.**
 
 ```
 ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
 │  Service Admin  │         │  VettID Portal  │         │  Control Plane  │
+│  (3rd Party)    │         │  (Registry)     │         │                 │
 └────────┬────────┘         └────────┬────────┘         └────────┬────────┘
          │                           │                           │
-         │  1. Register Service      │                           │
-         │ ─────────────────────────►│                           │
-         │   (org credentials,       │                           │
-         │    service metadata,      │                           │
-         │    callback URLs)         │                           │
+         │  1. Generate service keys │                           │
+         │     locally (Ed25519,     │                           │
+         │     X25519 keypairs)      │                           │
          │                           │                           │
-         │                           │  2. Create Service Record │
+         │  2. Register Service      │                           │
+         │ ─────────────────────────►│                           │
+         │   - Organization details  │                           │
+         │   - Service metadata      │                           │
+         │   - PUBLIC keys only      │                           │
+         │   - Handler manifest      │                           │
+         │   - Directory listing     │                           │
+         │                           │                           │
+         │                           │  3. Review & Approve      │
+         │                           │     (VettID vetting)      │
          │                           │ ─────────────────────────►│
          │                           │                           │
-         │                           │  3. Generate Service Keys │
+         │                           │  4. Create NATS account   │
+         │                           │     (permissions based    │
+         │                           │      on service type)     │
          │                           │◄───────────────────────── │
-         │                           │   (signing key pair,      │
-         │                           │    encryption key pair,   │
-         │                           │    NATS account)          │
          │                           │                           │
-         │  4. Return Service Bundle │                           │
+         │  5. Return Registration   │                           │
          │◄───────────────────────── │                           │
-         │   (service_guid,          │                           │
-         │    private keys (secure), │                           │
-         │    NATS credentials,      │                           │
-         │    deployment config)     │                           │
+         │   - service_guid          │                           │
+         │   - NATS account details  │                           │
+         │   - Endpoint configuration│                           │
+         │                           │                           │
+         │  6. Deploy Service Vault  │                           │
+         │     with own keys         │                           │
+         │     (provider controls)   │                           │
          │                           │                           │
 ```
 
+**Important**: VettID never possesses the service's private keys. The service provider:
+- Generates their own Ed25519 signing keypair
+- Generates their own X25519 encryption keypair
+- Registers only public keys with VettID
+- Maintains complete control over their private keys and infrastructure
+
 ### 2.3 Service Authentication to NATS
 
-Services authenticate to NATS using the same nkeys/JWT pattern as user vaults:
+Services authenticate to NATS using the nkeys/JWT pattern. The service signs its connection request with its private key, proving ownership of the registered public key.
 
 ```typescript
-// Service NATS JWT Structure
+// Service NATS JWT Structure (issued by VettID after registration approval)
 {
   "aud": "NATS",
   "exp": <timestamp + 30 days>,
@@ -142,15 +183,15 @@ Services authenticate to NATS using the same nkeys/JWT pattern as user vaults:
   "nats": {
     "pub": {
       "allow": [
-        "ServiceSpace.<service_guid>.>",           // Own namespace
-        "ConnectionSpace.*.forService.<service_guid>.>" // User connections
+        "ServiceSpace.<service_guid>.>",              // Own namespace
+        "ServiceSpace.<service_guid>.forUser.*.>"    // Messages to users
       ]
     },
     "sub": {
       "allow": [
         "ServiceSpace.<service_guid>.>",
-        "ConnectionSpace.*.forOwner.<service_guid>.>",  // From users
-        "Control.service.<service_guid>.>"              // Control commands
+        "ServiceSpace.<service_guid>.fromUser.*.>",  // Messages from users
+        "Control.service.<service_guid>.>"           // Control commands
       ]
     },
     "subs": 10000,      // Higher limit for multi-user
@@ -161,121 +202,166 @@ Services authenticate to NATS using the same nkeys/JWT pattern as user vaults:
 }
 ```
 
-### 2.4 Service-to-VettID Mutual Authentication
+### 2.4 Handler Manifest (Service Directory Integration)
 
-```
-┌─────────────────┐                              ┌─────────────────┐
-│  Service Vault  │                              │  NATS + Control │
-└────────┬────────┘                              └────────┬────────┘
-         │                                                │
-         │  1. Connect with Service JWT                   │
-         │ ──────────────────────────────────────────────►│
-         │                                                │
-         │  2. TLS handshake (server cert validation)     │
-         │◄──────────────────────────────────────────────►│
-         │                                                │
-         │  3. JWT signature validation (Ed25519)         │
-         │                                                │ ✓
-         │                                                │
-         │  4. Connection established                     │
-         │◄────────────────────────────────────────────── │
-         │                                                │
-         │  5. Subscribe to service topics                │
-         │ ──────────────────────────────────────────────►│
-         │     ServiceSpace.<service_guid>.>              │
-         │     ConnectionSpace.*.forOwner.<service_guid>.>│
-         │                                                │
+Similar to how VettID's Service Directory lists event handlers, each Service Vault publishes a **Handler Manifest** describing its capabilities:
+
+```typescript
+interface HandlerManifest {
+  service_guid: string;
+  version: string;
+
+  // Capabilities this service offers
+  capabilities: {
+    capability_id: string;
+    name: string;
+    description: string;
+    required_user_grants: string[];  // What user must approve
+    request_schema: object;          // JSON schema for requests
+    response_schema: object;         // JSON schema for responses
+  }[];
+
+  // Event types this service can handle
+  event_handlers: {
+    event_type: string;
+    description: string;
+    timeout_default: number;         // Default timeout in seconds
+    supports_offline: boolean;       // Can queue for offline users
+  }[];
+
+  // Subscription/payment options (if applicable)
+  subscription_plans?: SubscriptionPlan[];
+}
 ```
 
 ---
 
 ## 3. User-Service Connections
 
-### 3.1 Connection Authorization Flow
+### 3.1 Connection Contract Establishment
 
-Users must explicitly authorize services to interact with their vault:
+Users must explicitly authorize services via a **Connection Contract**. The contract defines what the service can do and persists until either party cancels it.
 
 ```
 ┌────────────┐     ┌────────────┐     ┌─────────────┐     ┌──────────────┐
-│  User App  │     │ User Vault │     │ Control API │     │ Service Vault│
+│  User App  │     │ User Vault │     │ VettID API  │     │ Service Vault│
 └─────┬──────┘     └─────┬──────┘     └──────┬──────┘     └──────┬───────┘
       │                  │                   │                   │
-      │ 1. User initiates│connection        │                   │
-      │   (scan QR/link) │                   │                   │
-      │ ─────────────────►                   │                   │
-      │                  │                   │                   │
-      │ 2. Fetch service │info              │                   │
+      │ 1. User browses  │                   │                   │
+      │    Service       │                   │                   │
+      │    Directory     │                   │                   │
       │ ─────────────────┼──────────────────►│                   │
       │                  │                   │                   │
-      │ 3. Return service│details           │                   │
-      │◄─────────────────┼───────────────── │                   │
-      │   (name, org,    │                   │                   │
-      │    capabilities  │                   │                   │
-      │    requested)    │                   │                   │
-      │                  │                   │                   │
-      │ 4. User reviews &│approves          │                   │
-      │   grants         │                   │                   │
+      │ 2. Select service│                   │                   │
+      │    to connect    │                   │                   │
       │ ─────────────────►                   │                   │
       │                  │                   │                   │
-      │                  │ 5. Create connection                 │
-      │                  │    grant record   │                   │
+      │                  │ 3. Fetch service  │                   │
+      │                  │    contract terms │                   │
       │                  │ ─────────────────►│                   │
       │                  │                   │                   │
-      │                  │ 6. Notify service │of new connection │
+      │ 4. Display       │                   │                   │
+      │    contract      │                   │                   │
+      │    (capabilities,│                   │                   │
+      │     terms, costs)│                   │                   │
+      │◄─────────────────┤                   │                   │
+      │                  │                   │                   │
+      │ 5. User reviews  │                   │                   │
+      │    & signs       │                   │                   │
+      │    contract      │                   │                   │
+      │ ─────────────────►                   │                   │
+      │                  │                   │                   │
+      │                  │ 6. Generate       │                   │
+      │                  │    connection keys│                   │
+      │                  │    (X25519 pair)  │                   │
+      │                  │                   │                   │
+      │                  │ 7. Store contract │                   │
+      │                  │    + notify       │                   │
+      │                  │ ─────────────────►│                   │
+      │                  │                   │                   │
+      │                  │                   │ 8. Route to       │
+      │                  │                   │    service        │
       │                  │                   │ ─────────────────►│
       │                  │                   │                   │
-      │                  │                   │  7. Service acks  │
+      │                  │                   │  9. Service acks  │
+      │                  │                   │     + sends pubkey│
       │                  │                   │◄───────────────── │
       │                  │                   │                   │
-      │                  │ 8. Exchange initial keys             │
-      │                  │◄─────────────────────────────────────►│
-      │                  │   (X25519 key agreement)             │
+      │                  │ 10. Complete key  │                   │
+      │                  │     exchange      │                   │
+      │                  │◄──────────────────┼───────────────────│
       │                  │                   │                   │
-      │ 9. Connection    │established       │                   │
-      │◄─────────────────┼──────────────────┼───────────────────►
+      │ 11. Contract     │                   │                   │
+      │     active       │                   │                   │
+      │◄─────────────────┤                   │                   │
       │                  │                   │                   │
 ```
 
-### 3.2 Connection Grant Structure
+### 3.2 Connection Contract Structure
 
 ```typescript
-interface ConnectionGrant {
-  connection_id: string;          // Unique connection identifier
+interface ConnectionContract {
+  contract_id: string;            // Unique contract identifier
   user_guid: string;              // User's VettID GUID
   service_guid: string;           // Service's identifier
 
-  // What the service can do
-  capabilities: CapabilityGrant[];
+  // Contract terms
+  capabilities: CapabilityContract[];
 
   // Connection security
   user_connection_key: string;    // User's X25519 public key for this connection
   service_connection_key: string; // Service's X25519 public key for this connection
-  key_rotation_schedule: string;  // e.g., "7d" for weekly rotation
 
-  // Lifecycle
+  // Lifecycle - persists until cancelled
   created_at: string;             // ISO8601
-  expires_at: string | null;      // null = no expiration
-  last_used_at: string;
-  revoked_at: string | null;
-  revoked_by: 'user' | 'service' | 'admin' | null;
+  last_activity_at: string;       // Updated on each interaction
+  cancelled_at: string | null;
+  cancelled_by: 'user' | 'service' | null;
+  cancellation_reason: string | null;
 
-  // Audit
-  consent_record: ConsentRecord;  // What user agreed to
+  // Payment terms (if applicable)
+  subscription: SubscriptionContract | null;
+
+  // Consent record
+  consent: ConsentRecord;
+
+  // Service-specific storage in user vault
+  vault_storage_allocation: {
+    private_namespace: string;    // Only this service can access
+    shared_namespaces: string[];  // Shared with approved services
+  };
 }
 
-interface CapabilityGrant {
-  capability: string;             // e.g., "authenticate", "read_profile", "sign_document"
-  scope: string[];                // Specific resources/contexts
-  constraints: object;            // Additional limitations
+interface CapabilityContract {
+  capability: string;
+  scope: string[];
+  constraints: object;
   granted_at: string;
-  expires_at: string | null;
+
+  // Request behavior
+  request_timeout: number;        // Service-defined timeout (1 min to 30 days)
+  offline_grace_period: number;   // Time after user comes online before expiry
+  requires_user_approval: boolean;// Whether to prompt user for each use
 }
 
 interface ConsentRecord {
-  consent_version: string;        // Service's ToS version
+  contract_version: string;       // Service's terms version
   consent_timestamp: string;
-  user_signature: string;         // User signed the consent
-  presented_capabilities: string[];
+  user_signature: string;         // User signed the contract
+  presented_terms: object;        // Exact terms user agreed to
+}
+
+interface SubscriptionContract {
+  plan_id: string;
+  plan_name: string;
+  billing_cycle: 'monthly' | 'yearly' | 'one_time';
+  amount: number;
+  currency: string;
+  payment_method_ref: string;     // Reference to user's payment method in vault
+  auto_renew: boolean;
+  next_billing_date: string | null;
+  started_at: string;
+  expires_at: string | null;
 }
 ```
 
@@ -283,15 +369,52 @@ interface ConsentRecord {
 
 Standard capabilities that services can request:
 
+#### Identity & Authentication
 | Capability | Description | User Prompt |
 |------------|-------------|-------------|
 | `authenticate` | Verify user identity | "Confirm your identity to this service" |
+| `authenticate.continuous` | Periodic re-authentication | "Allow ongoing identity verification" |
+| `verify_presence` | Check if user is available | "See when you're available" |
+
+#### Data Access
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
 | `read_profile` | Read basic profile info | "Share your name and contact info" |
 | `read_credentials` | Read specific credential types | "Share your [credential type]" |
-| `sign_request` | Request user signature | "Sign documents on your behalf" |
-| `receive_notifications` | Send notifications to user | "Send you notifications" |
-| `verify_presence` | Check if user is online | "See when you're available" |
+| `write_data` | Store data in user's vault (service namespace) | "Store data in your vault" |
+| `read_data` | Read service-stored data from user's vault | "Access stored service data" |
+
+#### Authorization & Signing
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
 | `authorization_request` | Request authorization decisions | "Ask for your approval on actions" |
+| `sign_document` | Request digital signatures | "Sign documents on your behalf" |
+| `sign_transaction` | Request transaction signatures | "Approve transactions" |
+
+#### Communication
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `send_notifications` | Send notifications to user | "Send you notifications" |
+| `text_chat` | Initiate text chat sessions | "Start text conversations with you" |
+| `voice_call` | Initiate voice calls | "Make voice calls to you" |
+| `video_call` | Initiate video calls | "Make video calls to you" |
+
+**Support Call Security**: The `voice_call` and `video_call` capabilities enable verified support channels. When a service calls a user, the user's app shows the verified service identity, eliminating support scam calls. Users can trust that "Acme Bank Support" is actually Acme Bank.
+
+#### Payments & Subscriptions
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `payment.one_time` | Request one-time payments | "Request payments from you" |
+| `payment.subscription` | Manage recurring payments | "Set up recurring payments" |
+| `payment.auto_renew` | Auto-renew subscriptions | "Automatically renew your subscription" |
+
+**Payment Flow**: VettID does not process payments. The user's vault stores payment method references (credit card tokens, BTC wallet refs). When a service requests payment, the user approves in their app, and the vault initiates payment through the user's configured payment provider.
+
+#### Service Discovery
+| Capability | Description | User Prompt |
+|------------|-------------|-------------|
+| `list_connections` | See what other services user is connected to | "See your other service connections" |
+| `request_collaboration` | Request shared data access with another service | "Share data between services you approve" |
 
 Custom capabilities can be defined by services and must be approved during registration.
 
@@ -299,96 +422,107 @@ Custom capabilities can be defined by services and must be approved during regis
 
 ## 4. NATS Topic Architecture
 
-### 4.1 New Namespaces for Services
+### 4.1 ServiceSpace Namespace
+
+All user-service communication flows through the service's **ServiceSpace**. NATS acts as a secure drop-box - messages are queued until the recipient retrieves them.
 
 ```
 NATS Topic Hierarchy:
 │
-├── OwnerSpace.<user_guid>/           # Existing: User ↔ User Vault
+├── OwnerSpace.<user_guid>/              # Existing: User ↔ User App
 │   ├── forVault.>
 │   ├── forApp.>
 │   └── ...
 │
-├── ServiceSpace.<service_guid>/       # NEW: Service internal operations
-│   ├── control.>                      # Service control commands
-│   ├── health.>                       # Health/status
-│   ├── metrics.>                      # Operational metrics
-│   └── internal.>                     # Service-internal messaging
-│
-├── ConnectionSpace.<user_guid>/       # NEW: User ↔ Service communication
-│   ├── forOwner.<service_guid>.>      # Service → User Vault
-│   │   ├── auth.request               # Authentication requests
-│   │   ├── authz.request              # Authorization requests
-│   │   ├── data.request               # Data requests
-│   │   └── notify.>                   # Notifications
+├── ServiceSpace.<service_guid>/          # Service's namespace
 │   │
-│   └── forService.<service_guid>.>    # User Vault → Service
-│       ├── auth.response.<event_id>
-│       ├── authz.response.<event_id>
-│       ├── data.response.<event_id>
-│       └── events.>                   # User-initiated events
+│   ├── fromUser.<user_guid>/             # User Vault → Service
+│   │   ├── auth.response.<event_id>      # Auth responses
+│   │   ├── authz.response.<event_id>     # Authorization responses
+│   │   ├── data.response.<event_id>      # Data responses
+│   │   ├── payment.response.<event_id>   # Payment confirmations
+│   │   ├── call.signal.<session_id>      # Call signaling
+│   │   └── events.>                      # User-initiated events
+│   │
+│   ├── forUser.<user_guid>/              # Service → User Vault
+│   │   ├── auth.request                  # Authentication requests
+│   │   ├── authz.request                 # Authorization requests
+│   │   ├── data.request                  # Data requests
+│   │   ├── payment.request               # Payment requests
+│   │   ├── call.initiate                 # Initiate call
+│   │   ├── call.signal.<session_id>      # Call signaling
+│   │   └── notify.>                      # Notifications
+│   │
+│   ├── directory/                        # Service discovery
+│   │   ├── manifest                      # Handler manifest
+│   │   └── status                        # Service health/availability
+│   │
+│   └── internal/                         # Service-internal (not for users)
+│       ├── control.>
+│       ├── health.>
+│       └── metrics.>
 │
-├── Control/                           # Existing + Extended
+├── Control/                              # Existing + Extended
 │   ├── global.*
 │   ├── enclave.*
 │   ├── user.*
-│   └── service.<service_guid>.*       # NEW: Service control
+│   └── service.<service_guid>.*          # Service control
 │
-└── Directory/                         # NEW: Service discovery
-    ├── services.list
-    ├── services.<service_guid>.info
-    └── services.<service_guid>.status
+└── Directory/                            # VettID Service Directory
+    ├── services.list                     # List all approved services
+    ├── services.<service_guid>.info      # Service public info
+    └── services.search                   # Search services
 ```
 
-### 4.2 Message Flow: Authentication Request
+### 4.2 Message Flow: Request with Timeout & Offline Support
+
+Services can set request timeouts and support offline users:
 
 ```
 ┌─────────────────┐                                   ┌─────────────────┐
 │  Service Vault  │                                   │   User Vault    │
 └────────┬────────┘                                   └────────┬────────┘
          │                                                     │
-         │ 1. Publish auth request                             │
+         │ 1. Publish request with timeout                     │
          │ ───────────────────────────────────────────────────►│
-         │    Topic: ConnectionSpace.<user_guid>.              │
-         │           forOwner.<service_guid>.auth.request      │
+         │    Topic: ServiceSpace.<svc>.forUser.<user>.        │
+         │           auth.request                              │
          │    Payload: {                                       │
          │      event_id: "uuid",                              │
          │      event_type: "auth.request",                    │
          │      timestamp: "ISO8601",                          │
-         │      encrypted_payload: {                           │
-         │        challenge: "random_bytes",                   │
-         │        purpose: "login",                            │
-         │        context: {...}                               │
-         │      }                                              │
+         │      expires_at: "ISO8601",    // Service-defined   │
+         │      offline_grace: 300,       // 5 min after online│
+         │      encrypted_payload: {...}                       │
          │    }                                                │
          │                                                     │
-         │                    2. Vault processes request       │
-         │                       - Decrypts with connection key│
-         │                       - Validates service identity  │
-         │                       - Checks capability grants    │
-         │                       - May prompt user via app     │
+         │    (Message queued in NATS JetStream)               │
          │                                                     │
-         │                    3. Publish response              │
+         │                    ─────────────────────────────    │
+         │                    User may be offline              │
+         │                    Message waits in queue           │
+         │                    ─────────────────────────────    │
+         │                                                     │
+         │                    2. User comes online             │
+         │                       Vault retrieves queued msgs   │
+         │                                                     │
+         │                    3. Check expiry:                 │
+         │                       - If past expires_at:         │
+         │                         discard (or notify expired) │
+         │                       - If within offline_grace     │
+         │                         after coming online:        │
+         │                         process normally            │
+         │                                                     │
+         │                    4. Process & respond             │
          │◄─────────────────────────────────────────────────── │
-         │    Topic: ConnectionSpace.<user_guid>.              │
-         │           forService.<service_guid>.auth.response.  │
-         │           <event_id>                                │
-         │    Payload: {                                       │
-         │      response_id: "uuid",                           │
-         │      event_id: "original_event_id",                 │
-         │      status: "success|denied|error",                │
-         │      encrypted_payload: {                           │
-         │        signed_challenge: "...",                     │
-         │        user_attestation: {...},                     │
-         │        new_connection_key: "..."  // Key rotation   │
-         │      }                                              │
-         │    }                                                │
+         │    Topic: ServiceSpace.<svc>.fromUser.<user>.       │
+         │           auth.response.<event_id>                  │
          │                                                     │
 ```
 
 ### 4.3 Message Encryption
 
-All ConnectionSpace messages use X25519 + XChaCha20-Poly1305, matching the existing pattern:
+All ServiceSpace messages use X25519 + XChaCha20-Poly1305:
 
 ```typescript
 interface EncryptedMessage {
@@ -396,15 +530,19 @@ interface EncryptedMessage {
   event_type: string;
   timestamp: string;
 
+  // Timeout handling
+  expires_at: string;             // When request expires
+  offline_grace_seconds: number;  // Grace period after user comes online
+
   // Ephemeral key for this message (perfect forward secrecy)
-  ephemeral_public_key: string;  // X25519
+  ephemeral_public_key: string;   // X25519
 
   // Encrypted with: ECDH(ephemeral_private, recipient_connection_key)
-  ciphertext: string;            // XChaCha20-Poly1305
-  nonce: string;                 // 24-byte nonce
+  ciphertext: string;             // XChaCha20-Poly1305
+  nonce: string;                  // 24-byte nonce
 
   // Signature for authenticity
-  signature: string;             // Ed25519 signature over (event_id || ciphertext)
+  signature: string;              // Ed25519 signature over (event_id || ciphertext)
 }
 ```
 
@@ -414,47 +552,68 @@ interface EncryptedMessage {
 
 ### 5.1 Deployment Model
 
-Unlike user vaults (which run in Nitro Enclaves for hardware security), Service Vaults are deployed by the service provider:
+Service Vaults are **entirely controlled by the service provider**. No Nitro Enclave is required since the service vault doesn't hold high-value secrets like cryptocurrency private keys. User-specific secrets are stored in user vaults, not service vaults.
 
 ```
-Option A: VettID-Hosted Service Vault (Recommended for SMBs)
+Service Vault Deployment (Provider-Controlled):
 ┌──────────────────────────────────────────────────────────────┐
-│                    VettID Cloud                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │  Nitro Enclave Cluster                                 │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐              │  │
-│  │  │ Service Vault A │  │ Service Vault B │  ...         │  │
-│  │  │ (Tenant: Acme)  │  │ (Tenant: Corp)  │              │  │
-│  │  └─────────────────┘  └─────────────────┘              │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                              │                               │
-│                         NATS Cluster                         │
-└──────────────────────────────────────────────────────────────┘
-         │                     │
-         ▼                     ▼
-   Acme Backend           Corp Backend
-   (Customer App)         (Customer App)
-
-
-Option B: Self-Hosted Service Vault (Enterprise)
-┌──────────────────────────────────────────────────────────────┐
-│                 Enterprise Infrastructure                     │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │  Service Vault Container/VM                            │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │  │
-│  │  │ NATS Client  │  │ Handler Eng. │  │ Service API  │  │  │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘  │  │
-│  └───────────────────────────┬────────────────────────────┘  │
-│                              │ Outbound only                 │
-│                         TLS/mTLS                             │
-└──────────────────────────────┼───────────────────────────────┘
-                               │
-                               ▼
-                    ┌──────────────────┐
-                    │  VettID NATS     │
-                    │  (Public Edge)   │
-                    └──────────────────┘
+│                 Service Provider Infrastructure               │
+│                                                               │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │  Service Vault (Container/VM/K8s)                       │ │
+│  │                                                          │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │ │
+│  │  │ NATS Client  │  │ Handler Eng. │  │ Service API  │   │ │
+│  │  │              │  │              │  │              │   │ │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘   │ │
+│  │                                                          │ │
+│  └────────────────────────────┬─────────────────────────────┘ │
+│                               │                               │
+│  ┌────────────────────────────┼────────────────────────────┐ │
+│  │                            │                             │ │
+│  │  ┌─────────────────┐  ┌────┴────┐  ┌─────────────────┐  │ │
+│  │  │ Hardened DB     │  │ Key     │  │ Audit Log       │  │ │
+│  │  │ (Connection     │  │ Store   │  │ (Immutable)     │  │ │
+│  │  │  contracts,     │  │ (HSM or │  │                 │  │ │
+│  │  │  state)         │  │  KMS)   │  │                 │  │ │
+│  │  └─────────────────┘  └─────────┘  └─────────────────┘  │ │
+│  │                                                          │ │
+│  │  Security Layer:                                         │ │
+│  │  - Encrypted at rest (provider's choice)                 │ │
+│  │  - TLS for all connections                               │ │
+│  │  - Service key in HSM/KMS (recommended)                  │ │
+│  │  - Connection keys in hardened DB                        │ │
+│  │                                                          │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                               │                               │
+│                          TLS/mTLS                             │
+│                      (Outbound only)                          │
+└───────────────────────────────┼───────────────────────────────┘
+                                │
+                                ▼
+                     ┌──────────────────┐
+                     │  VettID NATS     │
+                     │  Cluster         │
+                     └──────────────────┘
 ```
+
+**Security Recommendations for Service Vaults:**
+1. Store service signing key in HSM or cloud KMS
+2. Use encrypted database for connection contracts and keys
+3. Implement audit logging for all operations
+4. Use TLS 1.3 for all network connections
+5. Apply standard hardening (no root, minimal permissions, etc.)
+
+**What Service Vaults Store:**
+- Service identity keys (signing + encryption)
+- Connection contracts metadata
+- Per-user connection keys (for message encryption)
+- Operational state
+
+**What Service Vaults Do NOT Store:**
+- User credentials or PII
+- User payment details
+- User-specific secrets (these go in user's vault)
 
 ### 5.2 Internal Components
 
@@ -467,19 +626,20 @@ Service Vault Process Architecture:
 │  │                        SECURITY LAYER                            │    │
 │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │    │
 │  │  │ Key Manager   │  │ Auth Verifier │  │ Audit Logger      │    │    │
-│  │  │ - Service keys│  │ - JWT valid.  │  │ - All operations  │    │    │
-│  │  │ - Connection  │  │ - Signature   │  │ - Tamper-proof    │    │    │
-│  │  │   key store   │  │   verification│  │                   │    │    │
+│  │  │ - Service key │  │ - Signature   │  │ - All operations  │    │    │
+│  │  │   (in HSM)    │  │   verify      │  │ - Tamper-evident  │    │    │
+│  │  │ - Connection  │  │ - Contract    │  │                   │    │    │
+│  │  │   keys (DB)   │  │   validation  │  │                   │    │    │
 │  │  └───────────────┘  └───────────────┘  └───────────────────┘    │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │                      CONNECTION LAYER                            │    │
 │  │  ┌───────────────────────────┐  ┌───────────────────────────┐   │    │
-│  │  │    NATS Client Manager    │  │   Connection State Store  │   │    │
-│  │  │ - Reconnection handling   │  │ - Active connections      │   │    │
+│  │  │    NATS Client Manager    │  │   Contract State Store    │   │    │
+│  │  │ - Reconnection handling   │  │ - Active contracts        │   │    │
 │  │  │ - Subscription management │  │ - Key rotation tracking   │   │    │
-│  │  │ - Message routing         │  │ - Session state           │   │    │
+│  │  │ - Message routing         │  │ - Request state           │   │    │
 │  │  └───────────────────────────┘  └───────────────────────────┘   │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
@@ -487,9 +647,10 @@ Service Vault Process Architecture:
 │  │                       BUSINESS LAYER                             │    │
 │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │    │
 │  │  │ Handler Engine│  │ Request Queue │  │ Rate Limiter      │    │    │
-│  │  │ - Auth handler│  │ - Priority    │  │ - Per-user limits │    │    │
-│  │  │ - Data handler│  │ - Timeout     │  │ - Global limits   │    │    │
-│  │  │ - Custom      │  │ - Retry logic │  │                   │    │    │
+│  │  │ - Auth        │  │ - Timeout mgmt│  │ - Per-user limits │    │    │
+│  │  │ - Data        │  │ - Offline     │  │ - Global limits   │    │    │
+│  │  │ - Payment     │  │   support     │  │                   │    │    │
+│  │  │ - Calls       │  │ - Retry logic │  │                   │    │    │
 │  │  └───────────────┘  └───────────────┘  └───────────────────┘    │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
@@ -499,7 +660,6 @@ Service Vault Process Architecture:
 │  │  │    Service API Gateway    │  │   Webhook Dispatcher      │   │    │
 │  │  │ - REST/gRPC endpoints     │  │ - Event notifications     │   │    │
 │  │  │ - SDK integration points  │  │ - Delivery guarantees     │   │    │
-│  │  │ - mTLS authentication     │  │ - Retry with backoff      │   │    │
 │  │  └───────────────────────────┘  └───────────────────────────┘   │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
@@ -508,23 +668,24 @@ Service Vault Process Architecture:
 
 ### 5.3 Service API for Third Parties
 
-The Service Vault exposes an API for the 3rd party's backend:
+The Service Vault exposes an API for the service provider's backend:
 
 ```typescript
-// Service Vault API (for 3rd party backend integration)
+// Service Vault API (for service provider's backend)
 
 // Authentication
 POST /api/v1/auth/request
 {
-  user_id: string,           // VettID user identifier (from connection)
-  purpose: string,           // Why authentication is needed
-  context: object,           // Additional context
-  callback_url?: string,     // Webhook for async response
-  timeout_seconds?: number   // Max wait time (default: 30)
+  user_id: string,              // User's contract ID or VettID
+  purpose: string,              // Why authentication is needed
+  context: object,              // Additional context
+  expires_in_seconds?: number,  // Request timeout (default: 60, max: 30 days)
+  offline_grace_seconds?: number,// Grace period after online (default: 300)
+  callback_url?: string         // Webhook for async response
 }
 Response: {
   request_id: string,
-  status: "pending" | "completed" | "timeout" | "denied",
+  status: "pending" | "completed" | "expired" | "denied",
   result?: {
     authenticated: boolean,
     user_attestation: object,
@@ -536,165 +697,307 @@ Response: {
 POST /api/v1/authz/request
 {
   user_id: string,
-  action: string,            // What action needs authorization
-  resource: string,          // What resource
+  action: string,
+  resource: string,
   context: object,
+  expires_in_seconds?: number,
+  offline_grace_seconds?: number,
   callback_url?: string
 }
 Response: {
   request_id: string,
-  status: "pending" | "approved" | "denied" | "timeout",
+  status: "pending" | "approved" | "denied" | "expired",
   decision?: {
     allowed: boolean,
-    reason?: string,
-    constraints?: object,
-    expires_at?: string
+    constraints?: object
   }
 }
 
-// User Data (with explicit consent)
-GET /api/v1/users/{user_id}/profile
-Response: {
+// Initiate Call (text/voice/video)
+POST /api/v1/call/initiate
+{
   user_id: string,
-  display_name: string,      // Only if granted
-  // ... other consented fields
+  call_type: "text" | "voice" | "video",
+  purpose: string,              // e.g., "Support call regarding order #123"
+  agent_info: {
+    name: string,
+    role: string,
+    avatar_url?: string
+  },
+  expires_in_seconds?: number   // How long to wait for user to answer
+}
+Response: {
+  session_id: string,
+  status: "ringing" | "connected" | "declined" | "expired",
+  signaling_topic: string       // NATS topic for WebRTC signaling
 }
 
-// Connection Management
-GET /api/v1/connections
-POST /api/v1/connections/invite    // Generate connection invite
-DELETE /api/v1/connections/{id}    // Revoke connection
+// Payment Request
+POST /api/v1/payment/request
+{
+  user_id: string,
+  amount: number,
+  currency: string,
+  description: string,
+  payment_type: "one_time" | "subscription",
+  subscription_details?: {
+    plan_id: string,
+    billing_cycle: string,
+    auto_renew: boolean
+  },
+  expires_in_seconds?: number
+}
+Response: {
+  request_id: string,
+  status: "pending" | "completed" | "declined" | "expired",
+  transaction?: {
+    transaction_id: string,
+    amount: number,
+    currency: string,
+    timestamp: string
+  }
+}
 
-// Webhooks (from Service Vault to 3rd party)
+// Connection/Contract Management
+GET  /api/v1/contracts
+GET  /api/v1/contracts/{contract_id}
+POST /api/v1/contracts/invite           // Generate connection invite
+DELETE /api/v1/contracts/{contract_id}  // Service cancels contract
+
+// Webhooks (from Service Vault to service backend)
 POST {callback_url}
 {
-  event_type: "auth.completed" | "authz.decision" | "connection.established" | "connection.revoked",
+  event_type: string,           // "auth.completed", "payment.completed", etc.
   event_id: string,
   timestamp: string,
+  contract_id: string,
   data: object
 }
 ```
 
 ---
 
-## 6. Scalability Design
+## 6. Cross-Service Data Sharing
 
-### 6.1 Challenges
+### 6.1 User-Controlled Collaboration
 
-Unlike user vaults (1 vault = 1 user), Service Vaults face:
-
-1. **Many-to-One**: One service vault handles thousands/millions of users
-2. **Burst Traffic**: Login spikes, batch operations
-3. **State Management**: Tracking many active connections
-4. **Key Management**: Per-user connection keys at scale
-
-### 6.2 Scaling Architecture
+VettID maintains that **the user is in charge**. Services cannot communicate directly with each other. Instead, when services want to share data, they must request user approval for a **Combined Datastore**.
 
 ```
-                                    Load Balancer (NLB)
-                                           │
-                    ┌──────────────────────┼──────────────────────┐
-                    │                      │                      │
-                    ▼                      ▼                      ▼
-            ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-            │ SV Instance 1│       │ SV Instance 2│       │ SV Instance N│
-            │              │       │              │       │              │
-            │ ┌──────────┐ │       │ ┌──────────┐ │       │ ┌──────────┐ │
-            │ │NATS Conn │ │       │ │NATS Conn │ │       │ │NATS Conn │ │
-            │ │Pool      │ │       │ │Pool      │ │       │ │Pool      │ │
-            │ └──────────┘ │       │ └──────────┘ │       │ └──────────┘ │
-            └──────┬───────┘       └──────┬───────┘       └──────┬───────┘
-                   │                      │                      │
-                   └──────────────────────┼──────────────────────┘
-                                          │
-                                          ▼
-                              ┌───────────────────────┐
-                              │   Shared State Store  │
-                              │   (Redis Cluster)     │
-                              │                       │
-                              │ - Connection state    │
-                              │ - Key cache           │
-                              │ - Rate limit counters │
-                              │ - Request dedup       │
-                              └───────────────────────┘
-                                          │
-                   ┌──────────────────────┼──────────────────────┐
-                   │                      │                      │
-                   ▼                      ▼                      ▼
-            ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-            │Persistent    │       │Audit Log     │       │Key Vault     │
-            │Store (DB)    │       │(Immutable)   │       │(HSM/KMS)     │
-            │              │       │              │       │              │
-            │- Connections │       │- All events  │       │- Master keys │
-            │- Grants      │       │- Signatures  │       │- Key derivation
-            │- Metadata    │       │              │       │              │
-            └──────────────┘       └──────────────┘       └──────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         User's Vault Storage                             │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                    Service Namespaces                            │    │
+│  │                                                                   │    │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐   │    │
+│  │  │ Service A       │  │ Service B       │  │ Service C       │   │    │
+│  │  │ Private Space   │  │ Private Space   │  │ Private Space   │   │    │
+│  │  │                 │  │                 │  │                 │   │    │
+│  │  │ (Only A can     │  │ (Only B can     │  │ (Only C can     │   │    │
+│  │  │  read/write)    │  │  read/write)    │  │  read/write)    │   │    │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘   │    │
+│  │                                                                   │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                 Combined Datastores (User Approved)              │    │
+│  │                                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────┐     │    │
+│  │  │  Combined: "Health & Fitness"                           │     │    │
+│  │  │  Participants: [Service A, Service B]                   │     │    │
+│  │  │  Approved by user: 2024-01-15                           │     │    │
+│  │  │                                                          │     │    │
+│  │  │  ┌──────────────────┐  ┌──────────────────┐             │     │    │
+│  │  │  │ Shared Data      │  │ Audit Log        │             │     │    │
+│  │  │  │ - User profile   │  │ - A read profile │             │     │    │
+│  │  │  │ - Health metrics │  │ - B wrote metrics│             │     │    │
+│  │  │  │ - Preferences    │  │ - A read metrics │             │     │    │
+│  │  │  └──────────────────┘  └──────────────────┘             │     │    │
+│  │  └─────────────────────────────────────────────────────────┘     │    │
+│  │                                                                   │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 6.3 Connection Sharding
-
-For services with millions of users, shard connections:
+### 6.2 Collaboration Request Flow
 
 ```
-User Connection Routing:
-┌─────────────────────────────────────────────────────────────────┐
-│                         NATS Cluster                             │
-│                                                                  │
-│  ConnectionSpace.<user_guid>.forOwner.<service_guid>.*          │
-│                     │                                            │
-│                     │ Consistent hash routing                    │
-│                     ▼                                            │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐      │
-│  │  Shard 0    │  Shard 1    │  Shard 2    │  Shard N    │      │
-│  │ Users A-F   │ Users G-M   │ Users N-S   │ Users T-Z   │      │
-│  │             │             │             │             │      │
-│  │ SV Pod 0-2  │ SV Pod 3-5  │ SV Pod 6-8  │ SV Pod 9-11 │      │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘      │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+Service A wants to collaborate with Service B (both connected to user):
+
+1. Service A requests user's connected services
+   → User must have granted 'list_connections' capability
+   → Returns: [Service B, Service C, Service D]
+
+2. Service A requests collaboration with Service B
+   POST /api/v1/collaboration/request
+   {
+     target_service_guid: "<service_b_guid>",
+     purpose: "Share health data for integrated fitness tracking",
+     shared_data_schema: {
+       fields: ["health_metrics", "activity_log"],
+       access: {
+         service_a: ["read", "write"],
+         service_b: ["read", "write"]
+       }
+     }
+   }
+
+3. User receives approval request in app:
+   "Service A (Fitness App) wants to share data with Service B (Health Tracker):
+    - Health metrics (read/write for both)
+    - Activity log (read/write for both)
+
+    This creates a shared space both services can access.
+    All access will be logged and visible to you.
+
+    [Approve] [Deny]"
+
+4. User approves → Combined datastore created in user's vault
+
+5. Both services can now:
+   - Read/write to shared namespace
+   - All operations logged with full audit trail
+   - User can view all activity
+   - User can revoke at any time
 ```
 
-### 6.4 Request Processing Pipeline
+### 6.3 Combined Datastore Structure
 
-```
-Incoming Request → Request Queue → Worker Pool → Response
-                        │
-                        ▼
-                 ┌──────────────────┐
-                 │ Priority Levels  │
-                 │                  │
-                 │ P0: Auth (real-  │
-                 │     time login)  │
-                 │                  │
-                 │ P1: Authz        │
-                 │     (decisions)  │
-                 │                  │
-                 │ P2: Data         │
-                 │     (queries)    │
-                 │                  │
-                 │ P3: Batch        │
-                 │     (bulk ops)   │
-                 └──────────────────┘
+```typescript
+interface CombinedDatastore {
+  datastore_id: string;
+  name: string;                   // User-visible name
+  purpose: string;
+
+  participants: {
+    service_guid: string;
+    service_name: string;
+    permissions: ('read' | 'write')[];
+    joined_at: string;
+  }[];
+
+  schema: {
+    fields: DataField[];
+  };
+
+  created_at: string;
+  created_by_service: string;     // Which service initiated
+  approved_by_user_at: string;
+
+  // Full audit trail
+  audit_log: {
+    timestamp: string;
+    service_guid: string;
+    operation: 'read' | 'write' | 'delete';
+    field: string;
+    summary: string;              // Human-readable description
+  }[];
+}
 ```
 
 ---
 
-## 7. Security Considerations
+## 7. Payments & Subscriptions
 
-### 7.1 Threat Model
+### 7.1 Payment Model
+
+VettID does not process payments or take fees. Payments are between the user and service:
+
+```
+┌────────────────┐          ┌────────────────┐          ┌────────────────┐
+│  Service Vault │          │  User's Vault  │          │ Payment Provider│
+│                │          │                │          │ (User's choice) │
+└───────┬────────┘          └───────┬────────┘          └───────┬────────┘
+        │                           │                           │
+        │ 1. Payment request        │                           │
+        │ ─────────────────────────►│                           │
+        │   {amount, currency,      │                           │
+        │    description}           │                           │
+        │                           │                           │
+        │           2. User approves│in app                     │
+        │                           │                           │
+        │                           │ 3. Initiate payment       │
+        │                           │ ─────────────────────────►│
+        │                           │   (Using stored payment   │
+        │                           │    method reference)      │
+        │                           │                           │
+        │                           │ 4. Payment confirmation   │
+        │                           │◄───────────────────────── │
+        │                           │                           │
+        │ 5. Payment response       │                           │
+        │◄───────────────────────── │                           │
+        │   {transaction_id,        │                           │
+        │    status: "completed"}   │                           │
+        │                           │                           │
+```
+
+### 7.2 Subscription Management
+
+```typescript
+interface SubscriptionPlan {
+  plan_id: string;
+  name: string;
+  description: string;
+
+  pricing: {
+    amount: number;
+    currency: string;
+    billing_cycle: 'monthly' | 'yearly' | 'one_time';
+  };
+
+  features: string[];
+
+  // Auto-renewal settings
+  auto_renewal: {
+    supported: boolean;
+    default: boolean;
+    reminder_days_before: number;  // Notify user X days before renewal
+  };
+}
+
+// User's subscription in their vault
+interface UserSubscription {
+  subscription_id: string;
+  service_guid: string;
+  plan: SubscriptionPlan;
+
+  status: 'active' | 'cancelled' | 'expired' | 'payment_failed';
+
+  started_at: string;
+  current_period_end: string;
+
+  auto_renew: boolean;
+  payment_method_ref: string;     // Reference to user's payment method
+
+  history: {
+    timestamp: string;
+    event: 'created' | 'renewed' | 'cancelled' | 'payment_failed';
+    amount?: number;
+    transaction_id?: string;
+  }[];
+}
+```
+
+---
+
+## 8. Security Considerations
+
+### 8.1 Threat Model
 
 | Threat | Mitigation |
 |--------|------------|
-| **Compromised Service Vault** | Connection keys are per-user; compromise affects only that service's access, not user's vault |
-| **Service Impersonation** | Ed25519 signatures on all messages; NATS JWT authentication |
-| **Replay Attacks** | Event IDs, timestamps (5-min window), idempotency tracking |
+| **Compromised Service Vault** | Connection keys are per-user; service vault doesn't hold user secrets (stored in user vault) |
+| **Service Impersonation** | Ed25519 signatures on all messages; NATS JWT authentication; VettID registry approval |
+| **Replay Attacks** | Event IDs, timestamps, request expiry, idempotency tracking |
+| **Support Scam Calls** | Verified service identity displayed to user; only contracted services can call |
+| **Unauthorized Data Access** | Capability-based access; user approval required; full audit trail |
+| **Payment Fraud** | User approves each payment; no stored payment details in service vault |
+| **Cross-Service Data Leak** | Services have isolated namespaces; combined datastores require explicit user approval |
 | **Key Compromise** | Automatic key rotation; perfect forward secrecy with ephemeral keys |
-| **Denial of Service** | Per-user and global rate limits; priority queuing |
-| **Data Exfiltration** | Users control what data is shared; audit logging |
-| **MITM on NATS** | TLS 1.3; message-level encryption; PCR attestation binding |
-| **Malicious Service** | Registration vetting; capability approval; user consent required |
 
-### 7.2 Security Boundaries
+### 8.2 Security Boundaries
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -703,12 +1006,18 @@ Incoming Request → Request Queue → Worker Pool → Response
 │  ┌────────────────┐        ┌────────────────┐        ┌───────────────┐  │
 │  │  User Vault    │◄──────►│  NATS Cluster  │◄──────►│ Control Plane │  │
 │  │  (Full Trust)  │        │  (Transport)   │        │ (Admin Trust) │  │
+│  │                │        │                │        │               │  │
+│  │ Stores:        │        │ Stores:        │        │ Stores:       │  │
+│  │ - User secrets │        │ - Messages     │        │ - Registry    │  │
+│  │ - Service data │        │   (encrypted)  │        │ - Approvals   │  │
+│  │ - Payment refs │        │                │        │               │  │
+│  │ - Audit logs   │        │                │        │               │  │
 │  └────────────────┘        └───────┬────────┘        └───────────────┘  │
 │                                    │                                     │
 └────────────────────────────────────┼─────────────────────────────────────┘
                                      │
                     Message-level encryption
-                    + Capability enforcement
+                    + Contract enforcement
                                      │
 ┌────────────────────────────────────┼─────────────────────────────────────┐
 │                        TRUST BOUNDARY: Service Provider                  │
@@ -717,132 +1026,172 @@ Incoming Request → Request Queue → Worker Pool → Response
 │  │ Service Vault  │◄───────────────┘                                    │
 │  │ (Limited Trust)│                                                     │
 │  │                │                                                     │
-│  │ Can only:      │                                                     │
-│  │ - Access data  │                                                     │
-│  │   user granted │                                                     │
-│  │ - Send allowed │                                                     │
-│  │   message types│                                                     │
-│  │ - Within rate  │                                                     │
-│  │   limits       │                                                     │
+│  │ Stores:        │    Can only:                                        │
+│  │ - Service keys │    - Access data user granted                       │
+│  │ - Connection   │    - Send allowed message types                     │
+│  │   keys         │    - Request payments (user approves)               │
+│  │ - Contract     │    - Call users (with capability)                   │
+│  │   metadata     │                                                     │
+│  │                │    Cannot:                                          │
+│  │ Does NOT store:│    - Access user secrets                            │
+│  │ - User secrets │    - See other services' data                       │
+│  │ - User PII     │    - Bypass user approval                           │
+│  │ - Payment info │    - Impersonate other services                     │
 │  └────────────────┘                                                     │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.3 Audit Requirements
+### 8.3 Audit Requirements
 
-All Service Vault operations must be logged:
+All operations logged with full user visibility:
 
 ```typescript
 interface AuditEvent {
   event_id: string;
   timestamp: string;
 
-  // Actor
+  // Parties
   service_guid: string;
-  service_instance_id: string;
-
-  // Target
   user_guid: string;
-  connection_id: string;
+  contract_id: string;
 
   // Operation
-  operation: string;          // e.g., "auth.request", "data.read"
+  operation: string;
   capability_used: string;
 
   // Outcome
   status: "success" | "denied" | "error";
-  error_code?: string;
 
-  // Context
-  request_context: object;    // Sanitized (no PII)
-  response_summary: object;   // What was returned (summary only)
+  // Context (sanitized)
+  request_summary: string;        // Human-readable
+  response_summary: string;
 
   // Integrity
-  previous_event_hash: string;
-  event_hash: string;         // SHA-256(event || previous_hash)
-  signature: string;          // Service's Ed25519 signature
+  previous_hash: string;
+  event_hash: string;
+  signature: string;
 }
 ```
 
-### 7.4 Key Rotation
-
-```
-Connection Key Rotation Schedule:
-┌────────────────────────────────────────────────────────────────┐
-│                                                                │
-│  Initial Connection:                                           │
-│  User generates: X25519 keypair (user_connection_key)          │
-│  Service generates: X25519 keypair (service_connection_key)    │
-│  Exchange public keys during connection establishment          │
-│                                                                │
-│  Ongoing Rotation (every message OR time-based):               │
-│                                                                │
-│  Message N:                                                    │
-│  - Encrypt with current shared secret                          │
-│  - Include new_ephemeral_public_key in response                │
-│  - Derive new shared secret for Message N+1                    │
-│                                                                │
-│  Time-based Rotation (configurable, default 7 days):           │
-│  - Service initiates: "key_rotation" message                   │
-│  - User vault responds with new public key                     │
-│  - Both parties update connection keys                         │
-│  - Old keys retained for 1 hour (in-flight messages)           │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
-```
+Users can view their complete audit log in the VettID app, seeing exactly what each service has accessed.
 
 ---
 
-## 8. Implementation Phases
+## 9. Design Decisions
+
+Based on review feedback, the following design decisions have been made:
+
+### 9.1 Security Model
+
+**Decision**: Service Vaults do not require Nitro Enclaves.
+
+**Rationale**:
+- Service vaults hold connection keys, not high-value secrets like cryptocurrency keys
+- User-specific secrets are stored in the user's vault, not the service vault
+- Standard security practices (HSM for service key, encrypted DB, TLS) are sufficient
+- Service providers have flexibility in their deployment infrastructure
+
+**Recommendation**: Use HSM or cloud KMS for service signing key; encrypted database for connection keys.
+
+### 9.2 Connection Persistence
+
+**Decision**: Connections persist until one party cancels.
+
+**Rationale**:
+- NATS acts as a secure drop-box; no persistent network connections needed
+- Users and services may go offline for extended periods
+- Inactive connections don't consume resources (messages queue in NATS)
+- Explicit cancellation gives both parties clear control
+
+### 9.3 Offline Support
+
+**Decision**: Full offline support with service-defined expiration.
+
+**Implementation**:
+- Services set `expires_at` on each request (1 minute to 30 days)
+- Services set `offline_grace_seconds` for users coming back online
+- Expired requests are discarded (or notification sent)
+- Supports both immediate interactions and long-lived offers
+
+### 9.4 Multi-Vault Services
+
+**Decision**: Not required for MVP; scale horizontally within single logical service.
+
+**Rationale**:
+- Service vault doesn't store PII, just coordinates with user vaults
+- No data residency requirements for coordination layer
+- Horizontal scaling (multiple instances behind load balancer) handles capacity
+- May revisit for geographic latency optimization in future
+
+### 9.5 Service Directory
+
+**Decision**: VettID provides the Service Directory; services publish Handler Manifests.
+
+**Implementation**:
+- VettID maintains the user-facing Service Directory
+- Services publish capability/handler manifests to their ServiceSpace
+- Users browse Directory in VettID app to discover and connect to services
+- Similar pattern to existing VettID supported services (renamed to Service Directory)
+
+### 9.6 Billing Model
+
+**Decision**: VettID does not charge for service vaults or connections.
+
+**Implementation**:
+- Service operators offer free or paid services
+- Payments flow directly between user and service (via user's payment methods)
+- VettID has no visibility into payment transactions
+- Supports one-time payments, subscriptions, and auto-renewal
+
+### 9.7 Cross-Service Communication
+
+**Decision**: No direct service-to-service communication. User-controlled combined datastores.
+
+**Rationale**:
+- User is in charge; their vault is the center of their world
+- Services can request `list_connections` capability to see other services
+- Compatible services request combined datastore through user approval
+- Creates full audit trail of all cross-service data sharing
+- User maintains complete visibility and control
+
+---
+
+## 10. Implementation Phases
 
 ### Phase 1: Foundation (MVP)
-- [ ] Service registration system
+- [ ] Service Registry (VettID side)
 - [ ] Service Vault core (NATS connection, key management)
-- [ ] Basic authentication flow (service → user → response)
-- [ ] Connection establishment flow
-- [ ] Simple REST API for 3rd party integration
+- [ ] Connection Contract establishment
+- [ ] Basic authentication flow
+- [ ] Service Directory integration
+- [ ] Simple REST API for service providers
 
 ### Phase 2: Core Features
 - [ ] Authorization request/response flow
-- [ ] Capability grant management
-- [ ] User data access (profile, credentials)
+- [ ] User data access (read/write to user vault)
+- [ ] Notification delivery
+- [ ] Request timeout and offline support
 - [ ] Webhook delivery system
 - [ ] Audit logging
 
-### Phase 3: Scale & Security
-- [ ] Horizontal scaling (sharding, load balancing)
-- [ ] Rate limiting and priority queuing
-- [ ] Key rotation automation
-- [ ] VettID-hosted deployment option
+### Phase 3: Communication & Payments
+- [ ] Text chat capability
+- [ ] Voice call capability (WebRTC signaling)
+- [ ] Video call capability
+- [ ] One-time payment requests
+- [ ] Subscription management
+- [ ] Auto-renewal support
 
-### Phase 4: Advanced
+### Phase 4: Collaboration & Scale
+- [ ] Cross-service data sharing (combined datastores)
+- [ ] Horizontal scaling patterns
 - [ ] SDK for common platforms (Node.js, Python, Go)
-- [ ] Custom handler support (service-defined capabilities)
-- [ ] Batch operations
-- [ ] Analytics dashboard
+- [ ] Analytics dashboard for service providers
 
 ---
 
-## 9. Open Questions for Review
-
-1. **Enclave Requirement**: Should self-hosted Service Vaults require Nitro Enclaves, or is TLS + message encryption sufficient?
-
-2. **Connection Persistence**: How long should inactive connections persist before auto-revocation?
-
-3. **Offline Support**: Should services be able to cache user authorization for offline scenarios?
-
-4. **Multi-Vault Services**: Can a service have multiple vaults (e.g., regional deployment)?
-
-5. **Service Directory**: Should there be a public directory of registered services for users to browse?
-
-6. **Billing Model**: Per-connection? Per-request? Tiered by capability?
-
-7. **Cross-Service Communication**: Should services be able to communicate with each other via VettID?
-
----
-
-## 10. File Structure (Proposed)
+## 11. File Structure (Proposed)
 
 ```
 vettid-service-vault/
@@ -853,20 +1202,18 @@ vettid-service-vault/
 │   ├── SECURITY-MODEL.md
 │   ├── DEPLOYMENT-GUIDE.md
 │   └── SDK-INTEGRATION.md
-├── cdk/                               # AWS CDK infrastructure
+├── cdk/                               # AWS CDK infrastructure (VettID side)
 │   ├── lib/
-│   │   ├── service-vault-stack.ts
-│   │   ├── service-registration-stack.ts
+│   │   ├── service-registry-stack.ts
 │   │   └── service-nats-stack.ts
 │   └── lambda/
 │       ├── handlers/
 │       │   ├── service-registration.ts
-│       │   ├── connection-management.ts
-│       │   └── service-control.ts
+│       │   └── service-directory.ts
 │       └── common/
 │           ├── service-jwt.ts
 │           └── service-crypto.ts
-├── vault/                             # Service Vault implementation
+├── vault/                             # Service Vault reference implementation
 │   ├── cmd/
 │   │   └── service-vault/
 │   │       └── main.go
@@ -875,17 +1222,18 @@ vettid-service-vault/
 │   │   ├── crypto/                   # Key management, encryption
 │   │   ├── handlers/                 # Message handlers
 │   │   ├── api/                      # REST/gRPC API
-│   │   ├── store/                    # Connection state storage
+│   │   ├── store/                    # Contract state storage
 │   │   └── audit/                    # Audit logging
 │   └── pkg/
 │       └── sdk/                      # Embeddable SDK components
-├── sdk/                              # Client SDKs for 3rd parties
+├── sdk/                              # Client SDKs for service providers
 │   ├── node/
 │   ├── python/
 │   └── go/
 └── examples/
-    ├── basic-auth-service/
-    └── enterprise-integration/
+    ├── auth-service/                 # Simple auth integration
+    ├── support-center/               # Voice/video support example
+    └── subscription-service/         # Payment/subscription example
 ```
 
 ---
@@ -894,131 +1242,144 @@ vettid-service-vault/
 
 | Aspect | User Vault (OwnerVault) | Service Vault |
 |--------|------------------------|---------------|
-| **Operator** | VettID (managed) | Service Provider (self or VettID-hosted) |
+| **Operator** | VettID (managed) | Service Provider (self-managed) |
 | **Users** | 1 user per vault | Many users per vault |
 | **Primary Interface** | Mobile App | REST/gRPC API |
-| **Runs In** | Nitro Enclave (required) | Container/VM (enclave optional) |
-| **Holds** | User's encrypted credentials | Service identity + connection keys |
-| **NATS Namespace** | OwnerSpace | ServiceSpace + ConnectionSpace |
-| **Trust Level** | Full (user's own vault) | Limited (only granted capabilities) |
-| **Key Management** | User holds master key | Service holds service keys; user holds connection keys |
+| **Runs In** | Nitro Enclave (required) | Container/VM (provider's choice) |
+| **Holds** | User credentials, secrets, service data | Service identity + connection keys |
+| **NATS Namespace** | OwnerSpace | ServiceSpace |
+| **Trust Level** | Full (user's own vault) | Limited (only contracted capabilities) |
+| **Key Generation** | VettID manages | Provider generates & manages |
+| **PII Storage** | Yes (encrypted) | No |
+| **Payment Processing** | Yes (user's methods) | No (requests only) |
 
 ---
 
 ## Appendix B: Message Sequence Examples
 
-### B.1 SSO Login Flow
+### B.1 Verified Support Call Flow
 
 ```
-┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│   User   │     │  3P App  │     │  Service │     │   NATS   │     │   User   │
-│ Browser  │     │  Backend │     │  Vault   │     │          │     │  Vault   │
-└────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
-     │                │                │                │                │
-     │ 1. Click       │                │                │                │
-     │ "Login with    │                │                │                │
-     │  VettID"       │                │                │                │
-     │ ──────────────►│                │                │                │
-     │                │                │                │                │
-     │                │ 2. POST        │                │                │
-     │                │ /auth/request  │                │                │
-     │                │ ──────────────►│                │                │
-     │                │                │                │                │
-     │                │                │ 3. Publish     │                │
-     │                │                │ auth.request   │                │
-     │                │                │ ──────────────►│                │
-     │                │                │                │                │
-     │                │                │                │ 4. Route to    │
-     │                │                │                │ user vault     │
-     │                │                │                │ ──────────────►│
-     │                │                │                │                │
-     │                │                │                │                │ 5. Process
-     │                │                │                │                │ (may prompt
-     │                │                │                │                │  via app)
-     │                │                │                │                │
-     │                │                │                │ 6. Publish     │
-     │                │                │                │ auth.response  │
-     │                │                │                │◄────────────── │
-     │                │                │                │                │
-     │                │                │ 7. Receive     │                │
-     │                │                │ response       │                │
-     │                │                │◄────────────── │                │
-     │                │                │                │                │
-     │                │ 8. Return      │                │                │
-     │                │ auth result    │                │                │
-     │                │◄────────────── │                │                │
-     │                │                │                │                │
-     │ 9. Redirect    │                │                │                │
-     │ logged in      │                │                │                │
-     │◄────────────── │                │                │                │
-     │                │                │                │                │
+User has issue → Calls "Acme Bank" support through VettID app
+(Eliminates scam calls - user initiates from verified service listing)
+
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│ User App │     │User Vault│     │  NATS    │     │ Service  │
+│          │     │          │     │          │     │ Vault    │
+└────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
+     │                │                │                │
+     │ 1. User taps   │                │                │
+     │ "Call Support" │                │                │
+     │ on Acme Bank   │                │                │
+     │ ──────────────►│                │                │
+     │                │                │                │
+     │                │ 2. Initiate    │                │
+     │                │ call request   │                │
+     │                │ ──────────────►│                │
+     │                │                │ ──────────────►│
+     │                │                │                │
+     │                │                │ 3. Service     │
+     │                │                │ assigns agent  │
+     │                │                │◄────────────── │
+     │                │                │                │
+     │                │ 4. Call setup  │                │
+     │                │◄──────────────►│◄──────────────►│
+     │                │  (WebRTC       │                │
+     │                │   signaling)   │                │
+     │                │                │                │
+     │ 5. Connected   │                │                │
+     │◄──────────────►│                │                │
+     │                │                │                │
+     │ Display:       │                │                │
+     │ ┌────────────┐ │                │                │
+     │ │ ✓ Verified │ │                │                │
+     │ │ Acme Bank  │ │                │                │
+     │ │ Support    │ │                │                │
+     │ │            │ │                │                │
+     │ │ Agent: Sam │ │                │                │
+     │ └────────────┘ │                │                │
+     │                │                │                │
 ```
 
-### B.2 Authorization Decision Flow
+### B.2 Subscription Payment Flow
 
 ```
-User Action: "Transfer $500 to external account"
-    │
-    ▼
-┌────────────┐
-│ 3P Backend │ ─── POST /authz/request ───►┌──────────────┐
-│            │     {                        │ Service Vault│
-│            │       user_id: "...",        │              │
-│            │       action: "transfer",    │              │
-│            │       resource: "account",   │              │
-│            │       context: {             │              │
-│            │         amount: 500,         │              │
-│            │         destination: "ext"   │              │
-│            │       }                      │              │
-│            │     }                        │              │
-└────────────┘                              └──────┬───────┘
-                                                   │
-                                                   │ NATS: authz.request
-                                                   ▼
-                                            ┌──────────────┐
-                                            │  User Vault  │
-                                            │              │
-                                            │ Policy eval: │
-                                            │ - Amount>100 │
-                                            │   requires   │
-                                            │   user OK    │
-                                            └──────┬───────┘
-                                                   │
-                                                   │ Push notification
-                                                   ▼
-                                            ┌──────────────┐
-                                            │  User App    │
-                                            │              │
-                                            │ "Acme Bank   │
-                                            │  wants to    │
-                                            │  transfer    │
-                                            │  $500"       │
-                                            │              │
-                                            │ [Approve]    │
-                                            │ [Deny]       │
-                                            └──────┬───────┘
-                                                   │
-                                                   │ User taps Approve
-                                                   ▼
-                                            ┌──────────────┐
-                                            │  User Vault  │
-                                            │              │
-                                            │ authz.response
-                                            │ {allowed:true}
-                                            └──────┬───────┘
-                                                   │
-                                                   │ NATS: authz.response
-                                                   ▼
-                                            ┌──────────────┐
-                                            │ Service Vault│
-                                            └──────┬───────┘
-                                                   │
-                                                   │ Webhook/Response
-                                                   ▼
-                                            ┌──────────────┐
-                                            │ 3P Backend   │
-                                            │              │
-                                            │ Proceed with │
-                                            │ transfer     │
-                                            └──────────────┘
+Monthly subscription renewal with auto-pay:
+
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│ Service Vault│     │  User Vault  │     │Payment Provdr│
+└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
+       │                    │                    │
+       │ 1. Renewal due     │                    │
+       │    (auto-renew ON) │                    │
+       │ ──────────────────►│                    │
+       │   {plan_id,        │                    │
+       │    amount: $9.99}  │                    │
+       │                    │                    │
+       │                    │ 2. Check user      │
+       │                    │    settings:       │
+       │                    │    auto_renew=true │
+       │                    │                    │
+       │                    │ 3. Process payment │
+       │                    │ ──────────────────►│
+       │                    │   (using stored    │
+       │                    │    payment method) │
+       │                    │                    │
+       │                    │ 4. Payment success │
+       │                    │◄────────────────── │
+       │                    │                    │
+       │ 5. Renewal         │                    │
+       │    confirmed       │                    │
+       │◄────────────────── │                    │
+       │                    │                    │
+       │                    │ 6. Notify user     │
+       │                    │    (receipt in app)│
+       │                    │                    │
+```
+
+### B.3 Cross-Service Data Sharing
+
+```
+Fitness App wants to share data with Health Tracker:
+
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│ Fitness  │     │User Vault│     │ User App │     │ Health   │
+│ App (A)  │     │          │     │          │     │Tracker(B)│
+└────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
+     │                │                │                │
+     │ 1. Request     │                │                │
+     │ list_connections                │                │
+     │ ──────────────►│                │                │
+     │                │                │                │
+     │ 2. Return      │                │                │
+     │ [Health Tracker│                │                │
+     │  Service B]    │                │                │
+     │◄────────────── │                │                │
+     │                │                │                │
+     │ 3. Request     │                │                │
+     │ collaboration  │                │                │
+     │ with B         │                │                │
+     │ ──────────────►│                │                │
+     │                │                │                │
+     │                │ 4. Prompt user │                │
+     │                │ ──────────────►│                │
+     │                │  "Fitness App  │                │
+     │                │   wants to     │                │
+     │                │   share data   │                │
+     │                │   with Health  │                │
+     │                │   Tracker"     │                │
+     │                │                │                │
+     │                │ 5. User approves                │
+     │                │◄────────────── │                │
+     │                │                │                │
+     │                │ 6. Create combined datastore    │
+     │                │    + notify both services       │
+     │                │                │                │
+     │ 7. Access      │                │                │
+     │ granted        │                │                │
+     │◄──────────────►│◄──────────────────────────────►│
+     │                │                │                │
+     │  Both services can now read/write shared data   │
+     │  All access logged in user's audit trail        │
+     │                │                │                │
 ```
