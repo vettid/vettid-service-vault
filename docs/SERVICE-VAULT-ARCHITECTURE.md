@@ -451,13 +451,15 @@ Services can request that users store secrets in their protean credential. These
 | `secret.minor.read` | Retrieve minor secrets (no user interaction) | *(granted with write)* |
 | `secret.critical.write` | Store critical secrets in user's credential | "Store critical keys in your vault (password required to access)" |
 | `secret.critical.read` | Retrieve critical secrets (requires password + approval) | "Release critical key to [Service]?" |
+| `secret.user_owned.issue` | Issue a secret that becomes user's own property | "Accept a key that you will fully own and control" |
 
-**Two Tiers of Service Secrets:**
+**Three Tiers of Service Secrets:**
 
-| Tier | Examples | Storage | Retrieval | User Can View |
-|------|----------|---------|-----------|---------------|
-| **Minor** | Encryption keys, session tokens, API keys, preferences | User approves once at storage | Service retrieves automatically | No |
-| **Critical** | Crypto private keys, master recovery keys, signing keys | User approves + authenticates | User must enter password + approve each retrieval | No |
+| Tier | Examples | Storage | Retrieval | User Can View | Who Controls |
+|------|----------|---------|-----------|---------------|--------------|
+| **Minor** | Encryption keys, session tokens, API keys | User approves once | Service retrieves automatically | No | Service |
+| **Critical** | Service's master keys, signing keys | User approves + authenticates | Password + approval each time | No | Service |
+| **User-Owned** | User's crypto wallet keys, personal signing keys | User approves + authenticates | User has full control | Yes | User |
 
 **Minor Secrets Flow:**
 ```
@@ -484,6 +486,35 @@ Later, when service needs the secret:
 3. User enters password + approves
 4. Secret released to service (user never sees the value)
 ```
+
+**User-Owned Secrets Flow:**
+```
+1. Service requests: secret.user_owned.issue
+2. User sees: "Acme Wallet wants to issue you a private key.
+              This key will be YOURS - you can view it, export it,
+              and use it independently of Acme Wallet.
+              [Accept + Enter Password] [Decline]"
+3. User enters password to accept
+4. Secret stored in protean credential as USER'S OWN KEY
+
+User has full control:
+- View the key anytime (with password)
+- Export/backup the key
+- Use with any compatible service
+- Service can request to USE the key (user approves each time)
+- User can revoke service's access while keeping the key
+```
+
+**User-Owned vs Service-Controlled:**
+| Aspect | Minor/Critical (Service) | User-Owned |
+|--------|--------------------------|------------|
+| Who created it | Service | Service (issued to user) |
+| Who owns it | Service | User |
+| User can view | No | Yes (with password) |
+| User can export | No | Yes |
+| User can use independently | No | Yes |
+| On contract revocation | Return or delete | User keeps it |
+| Service can request use | Automatic (minor) or approval (critical) | User approves each use |
 
 **Security Properties:**
 - Secrets are encrypted within the user's protean credential
@@ -994,17 +1025,57 @@ Response: {
   secret_data?: string            // Only if released
 }
 
-// Delete a secret (service-initiated)
+// Issue a user-owned secret (user gains full ownership)
+POST /api/v1/secrets/user-owned/issue
+{
+  user_id: string,
+  secret_id: string,
+  secret_data: string,            // Base64-encoded secret
+  secret_type: string,            // "crypto_key", "signing_key", "recovery_phrase", etc.
+  metadata: {
+    name: string,                 // User-visible name: "My Acme Wallet Key"
+    description: string,          // "Your personal signing key for Acme Wallet"
+    key_type?: string,            // "ed25519", "secp256k1", etc.
+    created_at: string,
+    issued_by: string             // Service name (for provenance)
+  }
+}
+Response: {
+  request_id: string,
+  status: "pending" | "accepted" | "declined",
+  user_secret_id?: string         // User's reference to their own key
+}
+
+// Request to USE a user-owned secret (user must approve)
+POST /api/v1/secrets/user-owned/use
+{
+  user_id: string,
+  user_secret_id: string,         // Reference to user's key
+  purpose: string,                // "Sign transaction to 0x1234..."
+  operation: string,              // "sign", "decrypt", "derive", etc.
+  payload?: string,               // Data to operate on (if applicable)
+  expires_in_seconds?: number,
+  callback_url?: string
+}
+Response: {
+  request_id: string,
+  status: "pending" | "completed" | "denied" | "expired",
+  result?: string                 // Operation result (e.g., signature)
+}
+
+// Delete a service-controlled secret (service-initiated)
 DELETE /api/v1/secrets/{type}/{secret_id}?user_id={user_id}
 Response: {
   status: "deleted" | "not_found"
 }
+// Note: User-owned secrets cannot be deleted by service
 
 // List secrets for a user (metadata only, not values)
 GET /api/v1/secrets?user_id={user_id}
 Response: {
   minor: [{ secret_id, description, created_at, expires_at }],
-  critical: [{ secret_id, description, purpose, created_at }]
+  critical: [{ secret_id, description, purpose, created_at }],
+  user_owned: [{ user_secret_id, name, secret_type, issued_by, created_at }]
 }
 
 // Connection/Contract Management
