@@ -663,16 +663,82 @@ Standard capabilities that services can request:
 | `verify_presence` | Check if user is available | "See when you're available" |
 
 #### Data Access
+
+Services access user data through a metadata-first model. Users control what metadata is visible and must explicitly consent to share actual values.
+
 | Capability | Description | User Prompt |
 |------------|-------------|-------------|
-| `read_profile` | Read basic profile info | "Share your name and contact info" |
-| `read_credentials` | Read specific credential types | "Share your [credential type]" |
+| `browse_metadata` | See metadata about data in user's vault (user controls visibility) | "See what data you have stored" |
+| `request_data` | Request specific data values based on metadata | "Request access to your [data type]" |
 | `write_data` | Store data in user's vault (service namespace) | "Store data in your vault" |
 | `read_data` | Read service-stored data from user's vault | "Access stored service data" |
+
+**Data Request Flow:**
+```
+1. Service has `browse_metadata` capability
+2. Service sees: { type: "drivers_license", issuer: "CA DMV", expires: "2027-03-15" }
+   (User controls what metadata fields are visible)
+3. Service requests specific value via `request_data`
+4. User sees: "Acme Service wants to see your Driver's License
+              [Share Once] [Add to Contract] [Deny]"
+5. User chooses:
+   - Share Once: One-time release, no contract change
+   - Add to Contract: Service prepares contract update for ongoing access
+```
+
+**Contract Updates:**
+
+When a service needs to modify an existing contract (add/remove capabilities, data access, etc.):
+
+```typescript
+interface ContractUpdate {
+  contract_id: string;              // Existing contract being updated
+  prepared_by: 'service' | 'user';  // Who initiated the update
+
+  changes: {
+    added: {
+      capabilities?: CapabilityGrant[];
+      data_access?: DataRequirement[];
+      pricing_changes?: PricingChange;
+    };
+    removed: {
+      capabilities?: string[];      // Capability IDs being removed
+      data_access?: string[];       // Data types being removed
+    };
+  };
+
+  // Clear summary for user
+  summary: string;                  // "Add: Driver's License access. Remove: none."
+
+  // New contract snapshot if approved
+  updated_offering: ContractOffering;
+
+  // Service signature on proposed update
+  service_signature: {
+    signed_at: string;
+    signature: string;
+  };
+}
+```
+
+**Contract Update Flow:**
+```
+1. Service prepares ContractUpdate showing exactly what changes
+2. Update delivered to user via MessageSpace
+3. User sees clear diff: "Acme Service wants to update your contract:
+                         + ADD: Access to Driver's License
+                         + ADD: Access to email address
+                         - REMOVE: (nothing)
+                         [Approve & Sign] [Deny]"
+4. User signs update with their key
+5. Updated contract becomes active
+```
 
 #### Service Secrets (Stored in User's Protean Credential)
 
 Services can request that users store secrets in their protean credential. These secrets are **opaque to the user** - the user cannot view them, only release them back to the service.
+
+**Note:** Minor secret metadata can be included in `browse_metadata` results if the user allows, enabling services to know what secrets exist without accessing values.
 
 | Capability | Description | User Prompt |
 |------------|-------------|-------------|
