@@ -826,3 +826,79 @@ const dashboard = new cloudwatch.Dashboard(this, 'ServiceVaultDashboard', {
 | **Multi-tenancy** | Partition key + NATS accounts | Simple, secure, scalable |
 | **Encryption** | KMS customer-managed | Compliance, audit trail |
 | **No Nitro Enclave** | Not needed | Service vault doesn't hold user secrets |
+
+---
+
+## 11. Review Checklist
+
+### 11.1 Security Review
+
+**Multi-Tenant Isolation**
+- [ ] NATS account isolation: Can a compromised service access another service's topics?
+- [ ] DynamoDB partition key enforcement: Are there any query paths that bypass `service_id` scoping?
+- [ ] IAM condition policies: Can `${aws:PrincipalTag/service_id}` be spoofed or bypassed?
+- [ ] Cross-tenant data leakage: Review GSI queries (UserContracts) for isolation gaps
+- [ ] Secrets Manager namespacing: Verify `/services/{service_id}/*` paths are enforced
+
+**Network Security**
+- [ ] VPC endpoints: Confirm no internet egress required for AWS service calls
+- [ ] Security groups: Validate minimal ingress rules (443 from ALB, 4222 from internal only)
+- [ ] NLB exposure: Is NATS NLB correctly internal-only?
+- [ ] TLS configuration: Verify TLS 1.3 enforcement on all endpoints
+
+**Cryptography & Key Management**
+- [ ] KMS key policy: Review encryption context enforcement
+- [ ] Key rotation: Confirm automatic rotation is enabled
+- [ ] Secrets lifecycle: How are NATS credentials rotated?
+
+**Blast Radius Analysis**
+- [ ] Pool tier compute compromise: What data can an attacker access?
+- [ ] NATS cluster compromise: Can messages be intercepted across tenants?
+- [ ] DynamoDB table access: If IAM is bypassed, what's the exposure?
+
+**Compliance**
+- [ ] Audit logging completeness: Are all data access operations logged?
+- [ ] Data retention: How long is audit data retained?
+- [ ] Right to deletion: Can a service's data be fully purged?
+
+### 11.2 Architecture Review
+
+**Scaling Assumptions**
+- [ ] Fargate Spot 80/20 ratio: Is this appropriate for production workloads?
+- [ ] NATS cluster sizing (3x t4g.small): Sufficient for projected message volume?
+- [ ] DynamoDB PAY_PER_REQUEST: Cost-effective at scale, or should we use provisioned?
+
+**Cost Estimates**
+- [ ] Pool tier ($12/mo): Validate shared resource allocation model
+- [ ] Silo tier ($530/mo): Verify dedicated resource costs
+- [ ] Data transfer costs: Are cross-AZ and internet egress costs accounted for?
+
+**Failure Modes**
+- [ ] NATS cluster failure: What's the recovery process? Data loss implications?
+- [ ] Fargate Spot interruption: Is 20% on-demand sufficient for continuity?
+- [ ] DynamoDB throttling: How does the system behave under throttle?
+- [ ] MessageSpace connectivity loss: How do services handle VettID NATS unavailability?
+
+**Tier Migration**
+- [ ] Pool → Silo migration: Is the data migration strategy defined?
+- [ ] Rollback procedure: Can a failed migration be reversed?
+- [ ] Zero-downtime migration: Is this achievable with the current design?
+
+**Operational Concerns**
+- [ ] Tenant onboarding automation: Is the process fully automated?
+- [ ] Monitoring per-tenant: Can we alert on individual service health?
+- [ ] Capacity planning: How do we know when to scale the pool tier?
+
+### 11.3 Open Questions for Reviewers
+
+1. **Shared vs Isolated NATS**: Should pool tier services share a NATS cluster, or get isolated EC2 instances per service?
+
+2. **Table-level isolation threshold**: At what usage level should a service move from partition-key isolation to dedicated tables?
+
+3. **Bridge tier**: Should there be an intermediate tier between pool and silo for medium-sized services?
+
+4. **Multi-region**: What's the strategy for services requiring regional deployment?
+
+5. **Service mesh**: Should we consider Istio/App Mesh for service-to-service communication within the vault?
+
+6. **Backup strategy**: What's the RPO/RTO for service data? Is DynamoDB PITR sufficient?
