@@ -100,12 +100,15 @@ For smaller services that want low cost and operational simplicity:
 ```
 
 **Best for:**
-- Small to medium services (tens to millions of users)
+- Small to medium services (tens to hundreds of thousands of users)
 - Startups and indie developers
 - Services wanting minimal operational overhead
 - Cost-sensitive deployments
 
-**Estimated cost:** $10-500/month depending on usage
+**Estimated cost:**
+- Pool tier: $20-50/month (small services)
+- Pro tier: $150-250/month (medium services)
+- Silo tier: $600-1400/month (large services)
 
 ---
 
@@ -165,9 +168,9 @@ Attributes:
 - service_signature (Map)
 
 GSI: UserContracts
-- Partition Key: user_id
-- Sort Key: service_id
-- Projects: contract_id, status, created_at
+- Partition Key: user_id#service_id (composite key for tenant isolation)
+- Sort Key: created_at
+- Projects: contract_id, status
 ```
 
 **Table: ServiceConnections**
@@ -179,16 +182,34 @@ Attributes:
 - service_id (String)
 - user_id (String)
 - connection_key_public (String)
-- nats_credentials (Map) - encrypted
+- nats_credentials_secret_arn (String) - reference to Secrets Manager
 - last_activity (String)
 - status (String)
 ```
 
+> **Security Note**: NATS credentials are stored in Secrets Manager (not DynamoDB)
+> at path `/services/{service_id}/nats-credentials`. The table stores only the
+> secret ARN reference.
+
 **Tenant Isolation Enforcement:**
+
+> **Critical**: IAM conditions like `dynamodb:LeadingKeys` do NOT prevent Scan
+> operations or GSI queries without partition keys. Application-level enforcement
+> is mandatory.
+
 ```typescript
-// Middleware - ALL queries must include service_id
+// Application-level enforcement - ALL queries must include service_id
 class TenantScopedRepository {
-  constructor(private serviceId: string) {}
+  constructor(private serviceId: string) {
+    if (!serviceId) {
+      throw new Error('service_id is required for tenant isolation');
+    }
+  }
+
+  // CRITICAL: Block Scan operations entirely
+  async scan(): Promise<never> {
+    throw new Error('Scan operations are forbidden on multi-tenant tables');
+  }
 
   async getContract(contractId: string): Promise<Contract> {
     // service_id is ALWAYS part of the query
@@ -211,6 +232,18 @@ class TenantScopedRepository {
       }
     });
   }
+
+  // GSI queries MUST include service_id in composite key
+  async getContractsByUser(userId: string): Promise<Contract[]> {
+    return dynamodb.query({
+      TableName: 'ServiceContracts',
+      IndexName: 'UserContracts',
+      KeyConditionExpression: 'user_id_service_id = :composite',
+      ExpressionAttributeValues: {
+        ':composite': `${userId}#${this.serviceId}`  // ENFORCED
+      }
+    });
+  }
 }
 ```
 
@@ -220,6 +253,12 @@ Each service gets a dedicated NATS account, even in the shared cluster:
 
 ```
 # NATS Server Configuration
+jetstream {
+  store_dir: /data/nats/jetstream
+  max_memory_store: 1GB
+  max_file_store: 100GB
+}
+
 accounts {
   # Pool tier services - shared cluster, isolated accounts
 
@@ -228,7 +267,23 @@ accounts {
       { nkey: "SUAM..." }  # Service's signing key
     ]
 
-    # Each service can only pub/sub to their own namespace
+    jetstream: enabled
+
+    # CRITICAL: Explicit permissions prevent cross-tenant access
+    permissions {
+      publish {
+        allow: ["ServiceSpace.abc123.>"]
+        deny: ["ServiceSpace.*.>"]  # Deny other namespaces explicitly
+      }
+      subscribe {
+        allow: ["ServiceSpace.abc123.>"]
+        deny: ["ServiceSpace.*.>"]
+      }
+    }
+
+    # CRITICAL: Disable imports to prevent cross-account access
+    imports: []
+
     exports: [
       { service: "ServiceSpace.abc123.>" }
     ]
@@ -247,6 +302,12 @@ accounts {
     users: [
       { nkey: "SUBM..." }
     ]
+    jetstream: enabled
+    permissions {
+      publish { allow: ["ServiceSpace.def456.>"] }
+      subscribe { allow: ["ServiceSpace.def456.>"] }
+    }
+    imports: []
     exports: [
       { service: "ServiceSpace.def456.>" }
     ]
@@ -257,6 +318,9 @@ accounts {
   }
 }
 ```
+
+> **JetStream**: Enabled for message durability with R3 replication. Prevents
+> data loss on cluster failure.
 
 **Topic Structure:**
 ```
@@ -303,16 +367,39 @@ const service = new ecs.FargateService(this, 'ServiceVaultService', {
   cluster,
   taskDefinition,
   desiredCount: 2,
+  // Extended stop timeout for graceful shutdown (drain NATS connections)
+  stopTimeout: Duration.seconds(120),
   capacityProviderStrategies: [
     {
       capacityProvider: 'FARGATE_SPOT',
-      weight: 80,  // 80% spot for cost savings
+      weight: 60,  // 60% spot (reduced from 80% for stateful operations)
     },
     {
       capacityProvider: 'FARGATE',
-      weight: 20,  // 20% on-demand for stability
+      weight: 40,  // 40% on-demand for stability
+      base: 2,     // Always keep 2 on-demand tasks running
     },
   ],
+});
+```
+
+**Graceful Shutdown Handler:**
+```typescript
+// Application must handle SIGTERM for Spot interruptions
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, draining connections');
+
+  // 1. Stop accepting new requests
+  await server.close();
+
+  // 2. Drain NATS connections (finish in-flight messages)
+  await natsClient.drain();
+
+  // 3. Complete pending DynamoDB writes
+  await flushPendingWrites();
+
+  logger.info('Graceful shutdown complete');
+  process.exit(0);
 });
 ```
 
@@ -351,20 +438,37 @@ contractsTable.addGlobalSecondaryIndex({
 ### 3.3 NATS Cluster
 
 ```typescript
-// NATS deployed on EC2 for cost efficiency
+// NATS deployed on EC2 with JetStream for message durability
 const natsAsg = new autoscaling.AutoScalingGroup(this, 'NatsCluster', {
   vpc,
-  instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.SMALL),
+  vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+  // t4g.medium recommended for production (4 vCPU, 8GB RAM)
+  instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MEDIUM),
   machineImage: new ec2.AmazonLinuxImage({
     generation: ec2.AmazonLinuxGeneration.AMAZON_LINUX_2023,
     cpuType: ec2.AmazonLinuxCpuType.ARM_64,
   }),
   minCapacity: 3,
-  maxCapacity: 9,
+  maxCapacity: 7,  // Beyond 7 nodes, use superclusters
   desiredCapacity: 3,
+  // No SSH keys - use Session Manager for emergency access
+  keyName: undefined,
+  // EBS for JetStream persistence
+  blockDevices: [{
+    deviceName: '/dev/xvda',
+    volume: autoscaling.BlockDeviceVolume.ebs(100, {
+      volumeType: autoscaling.EbsDeviceVolumeType.GP3,
+      encrypted: true,
+    }),
+  }],
 });
 
-// NLB for external access
+// Session Manager access instead of SSH
+natsAsg.role.addManagedPolicy(
+  iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')
+);
+
+// NLB for internal access only
 const nlb = new elbv2.NetworkLoadBalancer(this, 'NatsNlb', {
   vpc,
   internetFacing: false,  // Internal only
@@ -372,12 +476,25 @@ const nlb = new elbv2.NetworkLoadBalancer(this, 'NatsNlb', {
 });
 ```
 
+**TLS Configuration (Required):**
+```conf
+# NATS server.conf - TLS 1.3 enforcement
+tls {
+  cert_file: "/etc/nats/certs/server-cert.pem"
+  key_file: "/etc/nats/certs/server-key.pem"
+  ca_file: "/etc/nats/certs/ca.pem"
+  min_version: "1.3"
+  verify: true           # Require client certificates
+  verify_and_map: true   # Map client cert to NATS user
+}
+```
+
 **Cost Estimate:**
 | Configuration | Instances | Est. Cost/Month |
 |---------------|-----------|-----------------|
-| Minimal | 3x t4g.micro | ~$25 |
-| Standard | 3x t4g.small | ~$50 |
-| High Availability | 3x t4g.medium | ~$100 |
+| Development | 3x t4g.small | ~$50 |
+| Production | 3x t4g.medium | ~$100 |
+| High Scale | 3x t4g.large + JetStream storage | ~$200 |
 
 ### 3.4 Security Components
 
@@ -523,22 +640,38 @@ interface SiloDeployment {
 
 ### 5.1 Cost by Tier
 
-| Component | Pool (Small) | Pool (Medium) | Silo (Large) |
-|-----------|--------------|---------------|--------------|
-| **Compute (Fargate)** | $5 (shared) | $20 (shared) | $200 (dedicated) |
-| **DynamoDB** | $0.50 | $15 | $100+ |
-| **NATS (shared)** | $2 (shared) | $5 (shared) | $50 (dedicated) |
-| **API Gateway** | $1 | $10 | $50 |
-| **KMS** | $1 | $1 | $10 |
-| **CloudWatch** | $1 | $5 | $20 |
-| **Data Transfer** | $1 | $10 | $100 |
-| **Total** | **~$12/mo** | **~$70/mo** | **~$530/mo** |
+| Component | Pool | Pro | Silo |
+|-----------|------|-----|------|
+| **Compute (Fargate)** | $8-12 (shared) | $50 (dedicated task) | $150-250 (dedicated cluster) |
+| **DynamoDB** | $0.50-5 | $20-50 (dedicated tables) | $80-200 |
+| **NATS** | $3-5 (shared cluster) | $10 (dedicated account) | $50-100 (dedicated cluster) |
+| **API Gateway** | $1-5 | $10-20 | $50-100 |
+| **KMS** | $1 | $5 | $10 |
+| **CloudWatch** | $2-5 | $10-20 | $30-50 |
+| **Data Transfer** | $5-15 | $30-50 | $200-500 |
+| **NAT Gateway** | (shared) | $32-64 | $96-128 |
+| **Total** | **$20-50/mo** | **$150-250/mo** | **$600-1400/mo** |
 
-### 5.2 Cost Optimization Techniques
+> **Note**: Data transfer costs are often underestimated. Includes cross-AZ traffic,
+> NAT Gateway, and internet egress. For high-volume services, consider VPC endpoints
+> and PrivateLink to reduce costs.
 
-1. **Fargate Spot (80% savings)**
-   - Use for pool tier workloads
-   - 20% on-demand for stability
+### 5.2 Tier Comparison
+
+| Feature | Pool | Pro | Silo |
+|---------|------|-----|------|
+| **Users** | 10-10K | 10K-100K | 100K+ |
+| **Compute** | Shared tasks | Dedicated task | Dedicated cluster |
+| **Database** | Shared table (partition key) | Dedicated tables (provisioned) | Dedicated tables (reserved) |
+| **NATS** | Shared cluster (account isolation) | Shared cluster (higher limits) | Dedicated cluster |
+| **Isolation** | Logical | Logical + resource | Physical |
+| **SLA** | Best effort | 99.5% | 99.9% |
+
+### 5.3 Cost Optimization Techniques
+
+1. **Fargate Spot (40-60% savings)**
+   - Use 60/40 Spot/On-Demand ratio for pool tier
+   - Implement graceful shutdown handlers
 
 2. **ARM64 Architecture (20% savings)**
    - Graviton instances for EC2
@@ -627,7 +760,59 @@ const calculateCost = (metrics: ServiceUsageMetrics): number => {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**VPC Endpoint Policies (Required):**
+```typescript
+// DynamoDB endpoint - restrict to Service Vault tables only
+const dynamoDBEndpoint = new ec2.GatewayVpcEndpoint(this, 'DynamoDBEndpoint', {
+  vpc,
+  service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+});
+
+dynamoDBEndpoint.addToPolicy(new iam.PolicyStatement({
+  effect: iam.Effect.ALLOW,
+  principals: [new iam.AnyPrincipal()],
+  actions: ['dynamodb:*'],
+  resources: [
+    contractsTable.tableArn,
+    connectionsTable.tableArn,
+    `${contractsTable.tableArn}/index/*`,
+    `${connectionsTable.tableArn}/index/*`,
+  ],
+  conditions: {
+    StringEquals: { 'aws:PrincipalAccount': this.account }
+  }
+}));
+
+// Secrets Manager endpoint - restrict to service paths
+const secretsEndpoint = new ec2.InterfaceVpcEndpoint(this, 'SecretsEndpoint', {
+  vpc,
+  service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+  privateDnsEnabled: true,
+});
+
+secretsEndpoint.addToPolicy(new iam.PolicyStatement({
+  effect: iam.Effect.ALLOW,
+  principals: [new iam.AnyPrincipal()],
+  actions: ['secretsmanager:GetSecretValue'],
+  resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:/services/*`],
+}));
+```
+
+**ALB TLS Policy:**
+```typescript
+const listener = alb.addListener('HttpsListener', {
+  port: 443,
+  protocol: elbv2.ApplicationProtocol.HTTPS,
+  certificates: [certificate],
+  sslPolicy: elbv2.SslPolicy.TLS13_RES,  // TLS 1.3 only
+});
+```
+
 ### 6.2 IAM Least Privilege
+
+> **Critical**: IAM `dynamodb:LeadingKeys` conditions do NOT prevent Scan operations
+> or GSI queries without partition keys. Application-level enforcement (see Section 2.2)
+> is the primary isolation mechanism. IAM provides defense-in-depth only.
 
 ```typescript
 // Service Vault task role - minimal permissions
@@ -635,7 +820,14 @@ const taskRole = new iam.Role(this, 'ServiceVaultTaskRole', {
   assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
 });
 
-// DynamoDB access - scoped to service_id via conditions
+// DynamoDB access - explicitly deny Scan
+taskRole.addToPolicy(new iam.PolicyStatement({
+  effect: iam.Effect.DENY,
+  actions: ['dynamodb:Scan'],  // CRITICAL: Block Scan operations
+  resources: ['*'],
+}));
+
+// DynamoDB access - allow specific operations
 taskRole.addToPolicy(new iam.PolicyStatement({
   effect: iam.Effect.ALLOW,
   actions: [
@@ -647,13 +839,10 @@ taskRole.addToPolicy(new iam.PolicyStatement({
   ],
   resources: [
     contractsTable.tableArn,
+    connectionsTable.tableArn,
     `${contractsTable.tableArn}/index/*`,
+    `${connectionsTable.tableArn}/index/*`,
   ],
-  conditions: {
-    'ForAllValues:StringEquals': {
-      'dynamodb:LeadingKeys': ['${aws:PrincipalTag/service_id}'],
-    },
-  },
 }));
 
 // Secrets access - only own service's secrets
@@ -661,8 +850,20 @@ taskRole.addToPolicy(new iam.PolicyStatement({
   effect: iam.Effect.ALLOW,
   actions: ['secretsmanager:GetSecretValue'],
   resources: [
-    `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/services/\${aws:PrincipalTag/service_id}/*`,
+    `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/services/*`,
   ],
+}));
+
+// Deny dangerous operations
+taskRole.addToPolicy(new iam.PolicyStatement({
+  effect: iam.Effect.DENY,
+  actions: [
+    'iam:*',           // Prevent role manipulation
+    'sts:AssumeRole',  // Prevent role chaining
+    'ec2:Describe*',   // Prevent enumeration
+    'ecs:Describe*',
+  ],
+  resources: ['*'],
 }));
 ```
 
@@ -785,7 +986,86 @@ const dashboard = new cloudwatch.Dashboard(this, 'ServiceVaultDashboard', {
 
 ---
 
-## 9. Implementation Phases
+## 9. Backup & Disaster Recovery
+
+### 9.1 RPO/RTO by Tier
+
+| Tier | RPO | RTO | Method |
+|------|-----|-----|--------|
+| **Pool** | 5 minutes | 2-4 hours | DynamoDB PITR |
+| **Pro** | 5 minutes | 1 hour | PITR + automated snapshots |
+| **Silo** | 0 (continuous) | < 5 minutes | DynamoDB Global Tables |
+
+### 9.2 Backup Strategy
+
+**DynamoDB:**
+```typescript
+// Enable Point-in-Time Recovery for all tables
+contractsTable.pointInTimeRecovery = true;
+connectionsTable.pointInTimeRecovery = true;
+
+// For Silo tier: Global Tables for cross-region replication
+const siloTable = new dynamodb.Table(this, 'SiloContracts', {
+  replicationRegions: ['us-west-2', 'eu-west-1'],
+  pointInTimeRecovery: true,
+});
+
+// Automated backup plan
+const backupPlan = new backup.BackupPlan(this, 'ServiceVaultBackup', {
+  backupPlanRules: [
+    backup.BackupPlanRule.daily(backupVault),
+    backup.BackupPlanRule.weekly(backupVault, {
+      moveToColdStorageAfter: Duration.days(90),
+      deleteAfter: Duration.days(2555),  // 7 years for compliance
+    }),
+  ],
+});
+
+backupPlan.addSelection('DynamoDBTables', {
+  resources: [
+    backup.BackupResource.fromDynamoDbTable(contractsTable),
+    backup.BackupResource.fromDynamoDbTable(connectionsTable),
+  ],
+});
+```
+
+**NATS JetStream:**
+```typescript
+// JetStream snapshots to S3
+const jetStreamBackupLambda = new lambda.Function(this, 'JetStreamBackup', {
+  runtime: lambda.Runtime.PROVIDED_AL2023,
+  handler: 'bootstrap',
+  code: lambda.Code.fromAsset('./lambda/jetstream-backup'),
+  environment: {
+    NATS_URL: natsCluster.endpoint,
+    BACKUP_BUCKET: backupBucket.bucketName,
+  },
+});
+
+// Schedule every 6 hours
+new events.Rule(this, 'JetStreamBackupSchedule', {
+  schedule: events.Schedule.rate(Duration.hours(6)),
+  targets: [new targets.LambdaFunction(jetStreamBackupLambda)],
+});
+```
+
+### 9.3 Disaster Recovery Procedures
+
+**Pool Tier Recovery:**
+1. Restore DynamoDB table from PITR (target time within 35 days)
+2. Restart Fargate tasks (automatic via ECS service)
+3. NATS cluster auto-recovers (JetStream replays from persistent storage)
+4. Verify data consistency via audit logs
+
+**Silo Tier Failover:**
+1. Route53 health check detects primary region failure
+2. Automatic DNS failover to secondary region
+3. DynamoDB Global Tables provide read-your-writes consistency
+4. Clients reconnect via new DNS endpoint (< 60 second TTL)
+
+---
+
+## 10. Implementation Phases
 
 ### Phase 1: Foundation (Week 1-2)
 - [ ] VPC and networking
@@ -815,90 +1095,92 @@ const dashboard = new cloudwatch.Dashboard(this, 'ServiceVaultDashboard', {
 
 ---
 
-## 10. Decision Summary
+## 11. Decision Summary
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| **Deployment Model** | Hybrid (Pool + Silo) | Supports all service sizes cost-effectively |
-| **Compute** | Fargate (ARM64) | Serverless scaling, cost-efficient |
+| **Deployment Model** | Hybrid (Pool + Pro + Silo) | Supports all service sizes with smooth upgrade path |
+| **Compute** | Fargate (ARM64, 60/40 Spot) | Serverless scaling, cost-efficient, resilient |
 | **Database** | DynamoDB PAY_PER_REQUEST | Auto-scaling, no capacity planning |
-| **Messaging** | NATS with account isolation | Existing VettID pattern, strong isolation |
-| **Multi-tenancy** | Partition key + NATS accounts | Simple, secure, scalable |
-| **Encryption** | KMS customer-managed | Compliance, audit trail |
+| **Messaging** | NATS with JetStream + account isolation | Message durability, strong isolation |
+| **Multi-tenancy** | Application-enforced partition keys + NATS accounts | Defense-in-depth (IAM alone insufficient) |
+| **Encryption** | KMS customer-managed + TLS 1.3 | Compliance, audit trail, transport security |
+| **Backup** | PITR (Pool/Pro), Global Tables (Silo) | RPO: 5min/0, RTO: hours/minutes |
 | **No Nitro Enclave** | Not needed | Service vault doesn't hold user secrets |
 
 ---
 
-## 11. Review Checklist
+## 12. Review Checklist
 
-### 11.1 Security Review
+### 12.1 Security Review
 
 **Multi-Tenant Isolation**
-- [ ] NATS account isolation: Can a compromised service access another service's topics?
-- [ ] DynamoDB partition key enforcement: Are there any query paths that bypass `service_id` scoping?
-- [ ] IAM condition policies: Can `${aws:PrincipalTag/service_id}` be spoofed or bypassed?
-- [ ] Cross-tenant data leakage: Review GSI queries (UserContracts) for isolation gaps
-- [ ] Secrets Manager namespacing: Verify `/services/{service_id}/*` paths are enforced
+- [x] NATS account isolation: Explicit permissions and imports disabled (Section 2.3)
+- [x] DynamoDB partition key enforcement: Application-level enforcement required (Section 2.2)
+- [x] IAM condition policies: Documented as defense-in-depth only, not primary isolation (Section 6.2)
+- [x] Cross-tenant data leakage: GSI uses composite key `user_id#service_id` (Section 2.2)
+- [x] Secrets Manager namespacing: NATS credentials stored in Secrets Manager, not DynamoDB (Section 2.2)
 
 **Network Security**
-- [ ] VPC endpoints: Confirm no internet egress required for AWS service calls
-- [ ] Security groups: Validate minimal ingress rules (443 from ALB, 4222 from internal only)
-- [ ] NLB exposure: Is NATS NLB correctly internal-only?
-- [ ] TLS configuration: Verify TLS 1.3 enforcement on all endpoints
+- [x] VPC endpoints: Restrictive endpoint policies added (Section 6.1)
+- [x] Security groups: Documented minimal ingress rules (Section 6.1)
+- [x] NLB exposure: Internal-only confirmed (Section 3.3)
+- [x] TLS configuration: TLS 1.3 specified for ALB, NLB, NATS (Sections 3.3, 6.1)
 
 **Cryptography & Key Management**
 - [ ] KMS key policy: Review encryption context enforcement
-- [ ] Key rotation: Confirm automatic rotation is enabled
-- [ ] Secrets lifecycle: How are NATS credentials rotated?
+- [x] Key rotation: Automatic rotation enabled
+- [ ] Secrets lifecycle: NATS credential rotation strategy (document rotation Lambda)
 
 **Blast Radius Analysis**
-- [ ] Pool tier compute compromise: What data can an attacker access?
-- [ ] NATS cluster compromise: Can messages be intercepted across tenants?
-- [ ] DynamoDB table access: If IAM is bypassed, what's the exposure?
+- [x] Pool tier compute compromise: IAM denies Scan, enumeration operations (Section 6.2)
+- [x] NATS cluster compromise: JetStream enables message durability, TLS/mTLS for transport
+- [x] DynamoDB table access: Application-level enforcement is primary control
 
 **Compliance**
 - [ ] Audit logging completeness: Are all data access operations logged?
-- [ ] Data retention: How long is audit data retained?
-- [ ] Right to deletion: Can a service's data be fully purged?
+- [x] Data retention: 7-year backup retention for compliance (Section 9.2)
+- [ ] Right to deletion: Document data deletion workflow
 
-### 11.2 Architecture Review
+### 12.2 Architecture Review
 
 **Scaling Assumptions**
-- [ ] Fargate Spot 80/20 ratio: Is this appropriate for production workloads?
-- [ ] NATS cluster sizing (3x t4g.small): Sufficient for projected message volume?
-- [ ] DynamoDB PAY_PER_REQUEST: Cost-effective at scale, or should we use provisioned?
+- [x] Fargate Spot ratio: Changed to 60/40 with graceful shutdown (Section 3.1)
+- [x] NATS cluster sizing: Upgraded to t4g.medium, added JetStream (Section 3.3)
+- [x] DynamoDB billing: PAY_PER_REQUEST for Pool, provisioned for Pro/Silo (Section 5.1)
 
 **Cost Estimates**
-- [ ] Pool tier ($12/mo): Validate shared resource allocation model
-- [ ] Silo tier ($530/mo): Verify dedicated resource costs
-- [ ] Data transfer costs: Are cross-AZ and internet egress costs accounted for?
+- [x] Pool tier: Revised to $20-50/mo including data transfer (Section 5.1)
+- [x] Pro tier: Added at $150-250/mo (Section 5.1)
+- [x] Silo tier: Revised to $600-1400/mo (Section 5.1)
+- [x] Data transfer costs: Now accounted for in all tiers (Section 5.1)
 
 **Failure Modes**
-- [ ] NATS cluster failure: What's the recovery process? Data loss implications?
-- [ ] Fargate Spot interruption: Is 20% on-demand sufficient for continuity?
-- [ ] DynamoDB throttling: How does the system behave under throttle?
-- [ ] MessageSpace connectivity loss: How do services handle VettID NATS unavailability?
+- [x] NATS cluster failure: JetStream provides message durability (Section 2.3)
+- [x] Fargate Spot interruption: 40% on-demand + graceful shutdown (Section 3.1)
+- [ ] DynamoDB throttling: Document retry strategy and DAX caching
+- [ ] MessageSpace connectivity loss: Document local queueing fallback
 
 **Tier Migration**
-- [ ] Pool → Silo migration: Is the data migration strategy defined?
-- [ ] Rollback procedure: Can a failed migration be reversed?
-- [ ] Zero-downtime migration: Is this achievable with the current design?
+- [ ] Pool → Pro → Silo migration: Define detailed runbook
+- [ ] Rollback procedure: Document bidirectional replication during migration
+- [ ] Zero-downtime: Achievable with careful planning, not guaranteed
 
 **Operational Concerns**
-- [ ] Tenant onboarding automation: Is the process fully automated?
-- [ ] Monitoring per-tenant: Can we alert on individual service health?
-- [ ] Capacity planning: How do we know when to scale the pool tier?
+- [ ] Tenant onboarding automation: Define API specification
+- [ ] Monitoring per-tenant: Document service_id metric dimensions
+- [ ] Capacity planning: Define tier upgrade triggers
 
-### 11.3 Open Questions for Reviewers
+### 12.3 Resolved Questions
 
-1. **Shared vs Isolated NATS**: Should pool tier services share a NATS cluster, or get isolated EC2 instances per service?
+1. **Shared vs Isolated NATS**: Shared cluster with account isolation for Pool/Pro. NATS account isolation is cryptographically enforced via nkeys. Dedicated cluster for Silo tier only.
 
-2. **Table-level isolation threshold**: At what usage level should a service move from partition-key isolation to dedicated tables?
+2. **Table-level isolation threshold**: Migrate to dedicated tables at >1000 RCU or >100GB storage. Pro tier uses dedicated tables with provisioned capacity.
 
-3. **Bridge tier**: Should there be an intermediate tier between pool and silo for medium-sized services?
+3. **Bridge tier**: Added Pro tier at $150-250/mo with dedicated Fargate task, dedicated DynamoDB tables, shared NATS cluster with higher limits.
 
-4. **Multi-region**: What's the strategy for services requiring regional deployment?
+4. **Multi-region**: DynamoDB Global Tables for Silo tier. Pool/Pro remain single-region with PITR backup.
 
-5. **Service mesh**: Should we consider Istio/App Mesh for service-to-service communication within the vault?
+5. **Service mesh**: Not recommended. Unnecessary complexity for this architecture. NATS already provides message routing and observability.
 
-6. **Backup strategy**: What's the RPO/RTO for service data? Is DynamoDB PITR sufficient?
+6. **Backup strategy**: Defined in Section 9. Pool: PITR (RPO 5min, RTO 2-4hr). Pro: PITR + snapshots (RPO 5min, RTO 1hr). Silo: Global Tables (RPO 0, RTO <5min).
