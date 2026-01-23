@@ -21,6 +21,11 @@ export interface ComputeStackProps extends cdk.StackProps {
  * - 60/40 Spot/On-Demand ratio for cost optimization
  * - ARM64 (Graviton) for additional savings
  * - Auto-scaling based on CPU and memory
+ *
+ * Silo tier uses:
+ * - 100% On-Demand for maximum reliability
+ * - Higher task resources (1 vCPU, 2GB memory)
+ * - Higher scaling limits
  */
 export class ComputeStack extends cdk.Stack {
   public readonly cluster: ecs.Cluster;
@@ -52,10 +57,11 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Task Definition
+    // Silo tier gets more resources per task for better performance
     const taskDefinition = new ecs.FargateTaskDefinition(this, 'ServiceVaultTask', {
       family: 'vettid-service-vault',
-      memoryLimitMiB: 512,
-      cpu: 256,
+      memoryLimitMiB: props.tier === 'silo' ? 2048 : 512,
+      cpu: props.tier === 'silo' ? 1024 : 256,
       taskRole: props.taskRole,
       executionRole,
       runtimePlatform: {
@@ -111,11 +117,33 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Fargate Service with capacity provider strategy
+    // Silo tier uses 100% On-Demand for maximum reliability
+    // Pool tier uses 60/40 Spot/On-Demand for cost optimization
+    const capacityProviderStrategies = props.tier === 'silo'
+      ? [
+          {
+            capacityProvider: 'FARGATE',
+            weight: 1,
+            base: 2,
+          },
+        ]
+      : [
+          {
+            capacityProvider: 'FARGATE_SPOT',
+            weight: 60,
+          },
+          {
+            capacityProvider: 'FARGATE',
+            weight: 40,
+            base: 2, // Always keep 2 on-demand tasks running
+          },
+        ];
+
     this.service = new ecs.FargateService(this, 'ServiceVaultService', {
       serviceName: 'service-vault',
       cluster: this.cluster,
       taskDefinition,
-      desiredCount: 2,
+      desiredCount: props.tier === 'silo' ? 3 : 2, // Silo starts with more tasks
       minHealthyPercent: 50,
       maxHealthyPercent: 200,
       assignPublicIp: false,
@@ -123,20 +151,8 @@ export class ComputeStack extends cdk.Stack {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
       securityGroups: [props.securityGroup],
-      // Extended stop timeout for graceful shutdown (drain NATS connections)
       enableExecuteCommand: true,
-      // Capacity provider strategy: 60% Spot, 40% On-Demand
-      capacityProviderStrategies: [
-        {
-          capacityProvider: 'FARGATE_SPOT',
-          weight: 60,
-        },
-        {
-          capacityProvider: 'FARGATE',
-          weight: 40,
-          base: 2, // Always keep 2 on-demand tasks running
-        },
-      ],
+      capacityProviderStrategies,
       circuitBreaker: {
         rollback: true,
       },
@@ -159,9 +175,10 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Auto-scaling
+    // Silo tier has higher min/max for dedicated workloads
     const scaling = this.service.autoScaleTaskCount({
-      minCapacity: 2,
-      maxCapacity: props.tier === 'silo' ? 50 : 20,
+      minCapacity: props.tier === 'silo' ? 3 : 2,
+      maxCapacity: props.tier === 'silo' ? 100 : 20,
     });
 
     // Scale on CPU utilization

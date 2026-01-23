@@ -3,7 +3,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
 export interface DatabaseStackProps extends cdk.StackProps {
-  tier: string;
+  readonly tier: 'pool' | 'silo';
 }
 
 /**
@@ -26,6 +26,7 @@ export class DatabaseStack extends cdk.Stack {
     // Contracts table
     // Primary key: service_id (PK), contract_id (SK)
     // GSI: user_id -> contracts for that user
+    // Silo tier uses provisioned capacity with auto-scaling for predictable costs
     this.contractsTable = new dynamodb.Table(this, 'ContractsTable', {
       tableName: 'vettid-service-vault-contracts',
       partitionKey: {
@@ -36,11 +37,34 @@ export class DatabaseStack extends cdk.Stack {
         name: 'contract_id',
         type: dynamodb.AttributeType.STRING
       },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      billingMode: props.tier === 'silo'
+        ? dynamodb.BillingMode.PROVISIONED
+        : dynamodb.BillingMode.PAY_PER_REQUEST,
+      readCapacity: props.tier === 'silo' ? 25 : undefined,
+      writeCapacity: props.tier === 'silo' ? 25 : undefined,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy,
     });
+
+    // Enable auto-scaling for silo tier
+    if (props.tier === 'silo') {
+      const readScaling = this.contractsTable.autoScaleReadCapacity({
+        minCapacity: 25,
+        maxCapacity: 1000,
+      });
+      readScaling.scaleOnUtilization({
+        targetUtilizationPercent: 70,
+      });
+
+      const writeScaling = this.contractsTable.autoScaleWriteCapacity({
+        minCapacity: 25,
+        maxCapacity: 1000,
+      });
+      writeScaling.scaleOnUtilization({
+        targetUtilizationPercent: 70,
+      });
+    }
 
     // GSI: Look up contracts by user_id
     this.contractsTable.addGlobalSecondaryIndex({
@@ -83,11 +107,34 @@ export class DatabaseStack extends cdk.Stack {
         name: 'request_id',
         type: dynamodb.AttributeType.STRING
       },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      billingMode: props.tier === 'silo'
+        ? dynamodb.BillingMode.PROVISIONED
+        : dynamodb.BillingMode.PAY_PER_REQUEST,
+      readCapacity: props.tier === 'silo' ? 50 : undefined,
+      writeCapacity: props.tier === 'silo' ? 50 : undefined,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       timeToLiveAttribute: 'ttl',
       removalPolicy,
     });
+
+    // Enable auto-scaling for silo tier (higher capacity for requests table)
+    if (props.tier === 'silo') {
+      const readScaling = this.requestsTable.autoScaleReadCapacity({
+        minCapacity: 50,
+        maxCapacity: 2000,
+      });
+      readScaling.scaleOnUtilization({
+        targetUtilizationPercent: 70,
+      });
+
+      const writeScaling = this.requestsTable.autoScaleWriteCapacity({
+        minCapacity: 50,
+        maxCapacity: 2000,
+      });
+      writeScaling.scaleOnUtilization({
+        targetUtilizationPercent: 70,
+      });
+    }
 
     // GSI: Look up pending requests by user
     this.requestsTable.addGlobalSecondaryIndex({
