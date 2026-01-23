@@ -58,6 +58,9 @@ type Response struct {
 	// Payload is the response payload (will be encrypted)
 	Payload []byte
 
+	// Data contains structured response data (alternative to Payload)
+	Data map[string]interface{}
+
 	// Error contains error details if status is error
 	Error *types.APIError
 }
@@ -230,4 +233,45 @@ func (e *Engine) Contracts() contract.Store {
 // ServiceID returns the service identifier.
 func (e *Engine) ServiceID() string {
 	return e.serviceID
+}
+
+// hasCapability checks if a user's contract grants the specified capability.
+func (e *Engine) hasCapability(ctx context.Context, userID string, capability types.CapabilityType) bool {
+	userContract, err := e.contracts.GetContractByUser(ctx, userID)
+	if err != nil || userContract == nil {
+		return false
+	}
+
+	// Check if the contract is active
+	if userContract.Status != types.ContractStatusActive {
+		return false
+	}
+
+	// Check capabilities in the offering snapshot
+	for _, grant := range userContract.OfferingSnapshot.Capabilities {
+		if grant.Capability == capability {
+			// Check if capability has expired
+			if grant.ExpiresAt != nil && grant.ExpiresAt.Before(time.Now()) {
+				continue
+			}
+			return true
+		}
+	}
+
+	return false
+}
+
+// callWebhook sends an HTTP POST to a webhook URL with the given event and payload.
+// This is used to notify services of async events like auth responses, call accepted, etc.
+// Note: This method creates its own context with a reasonable timeout for webhook calls.
+func (e *Engine) callWebhook(webhookURL, eventType string, payload interface{}) error {
+	if webhookURL == "" {
+		return nil // No webhook configured, silently skip
+	}
+
+	// Create a context with timeout for the webhook call
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	return callWebhookHTTP(ctx, webhookURL, eventType, payload)
 }

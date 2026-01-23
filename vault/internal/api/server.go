@@ -23,26 +23,32 @@ import (
 
 // Server is the REST API server.
 type Server struct {
-	router        chi.Router
-	httpServer    *http.Server
-	config        *config.Config
-	identity      *identity.ServiceIdentity
-	contracts     contract.Store
-	negotiator    *contract.Negotiator
-	authHandler   *handler.AuthHandler
-	authzHandler  *handler.AuthzHandler
-	logger        *slog.Logger
+	router         chi.Router
+	httpServer     *http.Server
+	config         *config.Config
+	identity       *identity.ServiceIdentity
+	contracts      contract.Store
+	negotiator     *contract.Negotiator
+	authHandler    *handler.AuthHandler
+	authzHandler   *handler.AuthzHandler
+	callHandler    *handler.CallHandler
+	paymentHandler *handler.PaymentHandler
+	secretsHandler *handler.SecretsHandler
+	logger         *slog.Logger
 }
 
 // ServerConfig holds configuration for the API server.
 type ServerConfig struct {
-	Config       *config.Config
-	Identity     *identity.ServiceIdentity
-	Contracts    contract.Store
-	Negotiator   *contract.Negotiator
-	AuthHandler  *handler.AuthHandler
-	AuthzHandler *handler.AuthzHandler
-	Logger       *slog.Logger
+	Config         *config.Config
+	Identity       *identity.ServiceIdentity
+	Contracts      contract.Store
+	Negotiator     *contract.Negotiator
+	AuthHandler    *handler.AuthHandler
+	AuthzHandler   *handler.AuthzHandler
+	CallHandler    *handler.CallHandler
+	PaymentHandler *handler.PaymentHandler
+	SecretsHandler *handler.SecretsHandler
+	Logger         *slog.Logger
 }
 
 // NewServer creates a new API server.
@@ -57,14 +63,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	s := &Server{
-		router:       chi.NewRouter(),
-		config:       cfg.Config,
-		identity:     cfg.Identity,
-		contracts:    cfg.Contracts,
-		negotiator:   cfg.Negotiator,
-		authHandler:  cfg.AuthHandler,
-		authzHandler: cfg.AuthzHandler,
-		logger:       logger,
+		router:         chi.NewRouter(),
+		config:         cfg.Config,
+		identity:       cfg.Identity,
+		contracts:      cfg.Contracts,
+		negotiator:     cfg.Negotiator,
+		authHandler:    cfg.AuthHandler,
+		authzHandler:   cfg.AuthzHandler,
+		callHandler:    cfg.CallHandler,
+		paymentHandler: cfg.PaymentHandler,
+		secretsHandler: cfg.SecretsHandler,
+		logger:         logger,
 	}
 
 	s.setupRoutes()
@@ -109,6 +118,31 @@ func (s *Server) setupRoutes() {
 			r.Get("/{contractID}", s.getContract)
 			r.Post("/invite", s.generateInvite)
 			r.Delete("/{contractID}", s.cancelContract)
+		})
+
+		// Call endpoints (SV-055)
+		r.Route("/call", func(r chi.Router) {
+			r.Post("/initiate", s.handleCallInitiate)
+			r.Post("/{callID}/end", s.handleCallEnd)
+			r.Get("/{callID}", s.getCallStatus)
+		})
+
+		// Payment endpoints (SV-056)
+		r.Route("/payment", func(r chi.Router) {
+			r.Post("/request", s.handlePaymentRequest)
+			r.Get("/request/{requestID}", s.getPaymentRequest)
+			r.Post("/request/{requestID}/complete", s.handlePaymentComplete)
+			r.Post("/request/{requestID}/fail", s.handlePaymentFail)
+			r.Post("/request/{requestID}/refund", s.handlePaymentRefund)
+		})
+
+		// Secrets endpoints (SV-057)
+		r.Route("/secrets", func(r chi.Router) {
+			r.Post("/store", s.handleSecretStore)
+			r.Post("/retrieve", s.handleSecretRetrieve)
+			r.Delete("/{secretID}", s.handleSecretDelete)
+			r.Get("/", s.handleSecretsList)
+			r.Put("/{secretID}", s.handleSecretUpdate)
 		})
 
 		// Service info

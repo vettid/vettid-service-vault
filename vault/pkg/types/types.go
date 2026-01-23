@@ -52,6 +52,9 @@ const (
 	CapabilityBrowseData   CapabilityType = "browse_data"
 	CapabilityRequestData  CapabilityType = "request_data"
 	CapabilityNotify       CapabilityType = "notify"
+	CapabilityCall         CapabilityType = "call"
+	CapabilityPayment      CapabilityType = "payment"
+	CapabilitySecrets      CapabilityType = "secrets"
 )
 
 // Capability aliases for handler package
@@ -274,4 +277,103 @@ type APIError struct {
 
 func (e APIError) Error() string {
 	return e.Message
+}
+
+// ============================================================================
+// Call Types (Phase 3)
+// ============================================================================
+
+// CallRequest represents a request to initiate a call with a user.
+type CallRequest struct {
+	RequestID   string                 `json:"request_id"`
+	UserID      string                 `json:"user_id"`
+	Type        string                 `json:"type"` // voice, video
+	Purpose     string                 `json:"purpose,omitempty"`
+	Context     map[string]interface{} `json:"context,omitempty"`
+	ICEServers  []ICEServer            `json:"ice_servers,omitempty"`
+	Offer       *RTCSessionDescription `json:"offer,omitempty"`
+	ExpiresAt   time.Time              `json:"expires_at"`
+}
+
+// ICEServer represents a STUN/TURN server for WebRTC.
+type ICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// RTCSessionDescription represents an SDP offer or answer.
+type RTCSessionDescription struct {
+	Type string `json:"type"` // offer, answer
+	SDP  string `json:"sdp"`
+}
+
+// ============================================================================
+// Payment Types (Phase 3)
+// ============================================================================
+
+// PaymentRequest represents a payment request to a user.
+type PaymentRequest struct {
+	RequestID      string           `json:"request_id"`
+	UserID         string           `json:"user_id"`
+	Amount         Money            `json:"amount"`
+	Description    string           `json:"description"`
+	MerchantInfo   MerchantInfo     `json:"merchant_info"`
+	Items          []PaymentItem    `json:"items,omitempty"`
+	AllowedMethods []string         `json:"allowed_methods,omitempty"`
+	RecurringInfo  *RecurringInfo   `json:"recurring_info,omitempty"`
+	ExpiresAt      time.Time        `json:"expires_at"`
+}
+
+// Money represents a monetary amount.
+type Money struct {
+	Amount   int64  `json:"amount"`   // Amount in smallest currency unit
+	Currency string `json:"currency"` // ISO 4217 currency code
+}
+
+// MerchantInfo contains merchant identification.
+type MerchantInfo struct {
+	MerchantID   string `json:"merchant_id"`
+	MerchantName string `json:"merchant_name"`
+	MerchantURL  string `json:"merchant_url,omitempty"`
+	MerchantLogo string `json:"merchant_logo,omitempty"`
+	Category     string `json:"category,omitempty"`
+}
+
+// PaymentItem represents a line item in a payment.
+type PaymentItem struct {
+	ItemID      string `json:"item_id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Quantity    int    `json:"quantity"`
+	UnitPrice   Money  `json:"unit_price"`
+	TotalPrice  Money  `json:"total_price"`
+	ImageURL    string `json:"image_url,omitempty"`
+}
+
+// RecurringInfo describes recurring payment terms.
+type RecurringInfo struct {
+	Interval      string     `json:"interval"` // day, week, month, year
+	IntervalCount int        `json:"interval_count"`
+	StartDate     time.Time  `json:"start_date"`
+	EndDate       *time.Time `json:"end_date,omitempty"`
+	TrialDays     int        `json:"trial_days,omitempty"`
+}
+
+// ============================================================================
+// Secrets Types (Phase 3)
+// ============================================================================
+
+// SecretRequest represents a request to store/retrieve/manage secrets.
+type SecretRequest struct {
+	RequestID   string                 `json:"request_id"`
+	UserID      string                 `json:"user_id"`
+	Operation   string                 `json:"operation"` // store, retrieve, delete, list, update
+	SecretType  string                 `json:"secret_type,omitempty"` // minor, critical, user_owned
+	SecretID    string                 `json:"secret_id,omitempty"`
+	Name        string                 `json:"name,omitempty"`
+	Description string                 `json:"description,omitempty"`
+	Data        []byte                 `json:"data,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	ExpiresAt   time.Time              `json:"expires_at"`
 }
