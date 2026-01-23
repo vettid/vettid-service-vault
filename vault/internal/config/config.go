@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,11 @@ type Config struct {
 
 	// Environment
 	Environment string `json:"environment"` // development, staging, production
+
+	// API Security
+	APIKeys          []string `json:"api_keys"`           // Valid API keys (hashed with SHA-256)
+	RateLimitPerSec  int      `json:"rate_limit_per_sec"` // Requests per second per client
+	RateLimitBurst   int      `json:"rate_limit_burst"`   // Burst capacity
 }
 
 // DefaultConfig returns a Config with sensible defaults for development.
@@ -54,6 +60,8 @@ func DefaultConfig() *Config {
 		DefaultTimeout:       5 * time.Minute,
 		DefaultOfflineGrace:  24 * time.Hour,
 		Environment:          "development",
+		RateLimitPerSec:      100,
+		RateLimitBurst:       200,
 	}
 }
 
@@ -138,6 +146,20 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("ENVIRONMENT"); v != "" {
 		c.Environment = v
 	}
+	if v := os.Getenv("API_KEYS"); v != "" {
+		// API_KEYS is a comma-separated list of SHA-256 hashed keys
+		c.APIKeys = splitAndTrim(v)
+	}
+	if v := os.Getenv("RATE_LIMIT_PER_SEC"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			c.RateLimitPerSec = i
+		}
+	}
+	if v := os.Getenv("RATE_LIMIT_BURST"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			c.RateLimitBurst = i
+		}
+	}
 }
 
 // Validate checks that the configuration is valid.
@@ -187,4 +209,17 @@ func getEnvInt(key string, defaultVal int) int {
 		}
 	}
 	return defaultVal
+}
+
+// splitAndTrim splits a comma-separated string and trims whitespace from each element.
+func splitAndTrim(s string) []string {
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }

@@ -261,6 +261,7 @@ const (
 	ErrCodeNotFound           = "not_found"
 	ErrCodeConflict           = "conflict"
 	ErrCodeTimeout            = "timeout"
+	ErrCodeRateLimited        = "rate_limited"
 	ErrCodeUserOffline        = "user_offline"
 	ErrCodeContractRequired   = "contract_required"
 	ErrCodeCapabilityDenied   = "capability_denied"

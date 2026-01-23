@@ -97,6 +97,8 @@ func (s *Server) setupRoutes() {
 
 	// API v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
+		// Apply rate limiting before authentication
+		r.Use(RateLimitMiddleware(s.config.RateLimitPerSec, s.config.RateLimitBurst))
 		// Apply API key authentication
 		r.Use(s.apiKeyAuth)
 
