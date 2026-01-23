@@ -1,0 +1,674 @@
+openapi: 3.0.3
+info:
+  title: VettID Service Vault API
+  description: |
+    REST API for VettID Service Vault - enables third-party services to
+    integrate with VettID for user authentication and authorization.
+
+    ## Authentication
+    All API endpoints (except health checks) require Bearer token authentication.
+    Include your API key in the Authorization header:
+    ```
+    Authorization: Bearer <your-api-key>
+    ```
+
+    ## Core Concepts
+
+    ### Contracts
+    Contracts establish the relationship between a service and a user.
+    They specify what capabilities the service has and what data it can access.
+
+    ### Authentication Requests
+    Request proof-of-identity from a user. The user must approve on their device.
+
+    ### Authorization Requests
+    Request permission for a specific action on a resource. The user approves
+    or denies, and may set constraints on the approval.
+  version: 1.0.0
+  contact:
+    name: VettID Support
+    url: https://vettid.com/support
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.vettid.com
+    description: Production
+
+tags:
+  - name: Health
+    description: Health check endpoints
+  - name: Auth
+    description: Authentication request management
+  - name: Authz
+    description: Authorization request management
+  - name: Contracts
+    description: Contract management
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns service health status
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      description: Returns service readiness status
+      operationId: readyCheck
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+
+  /api/v1/info:
+    get:
+      tags: [Health]
+      summary: Service information
+      description: Returns information about this service
+      operationId: getServiceInfo
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Service information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service_id:
+                    type: string
+                    example: 3Kj9mNxPqRsT5vWy
+                  service_name:
+                    type: string
+                    example: My Service
+                  service_type:
+                    type: string
+                    example: payment
+                  domain:
+                    type: string
+                    example: example.com
+                  domain_verified:
+                    type: boolean
+                    example: true
+
+  /api/v1/auth/request:
+    post:
+      tags: [Auth]
+      summary: Create authentication request
+      description: |
+        Creates a new authentication request for a user. The request is sent
+        to the user's device where they can approve or deny it.
+      operationId: createAuthRequest
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRequestInput'
+      responses:
+        '201':
+          description: Authentication request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthRequestOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/request/{requestId}:
+    get:
+      tags: [Auth]
+      summary: Get authentication request status
+      description: Returns the current status of an authentication request
+      operationId: getAuthRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authentication request status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthRequestStatus'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/authz/request:
+    post:
+      tags: [Authz]
+      summary: Create authorization request
+      description: |
+        Creates a new authorization request for a specific action on a resource.
+        The user must approve the action on their device.
+      operationId: createAuthzRequest
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthzRequestInput'
+      responses:
+        '201':
+          description: Authorization request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthzRequestOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/authz/request/{requestId}:
+    get:
+      tags: [Authz]
+      summary: Get authorization request status
+      description: Returns the current status of an authorization request
+      operationId: getAuthzRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authorization request status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthzRequestStatus'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/contracts:
+    get:
+      tags: [Contracts]
+      summary: List contracts
+      description: Lists all contracts for this service
+      operationId: listContracts
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            type: string
+          description: Filter by user ID
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ContractStatus'
+          description: Filter by status
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Maximum number of results
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor
+      responses:
+        '200':
+          description: List of contracts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractListOutput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/contracts/{contractId}:
+    get:
+      tags: [Contracts]
+      summary: Get contract details
+      description: Returns detailed information about a specific contract
+      operationId: getContract
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Contract details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [Contracts]
+      summary: Cancel contract
+      description: Cancels an active contract
+      operationId: cancelContract
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: reason
+          in: query
+          schema:
+            type: string
+          description: Reason for cancellation
+      responses:
+        '200':
+          description: Contract cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: cancelled
+                  message:
+                    type: string
+                    example: contract has been cancelled
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/contracts/invite:
+    post:
+      tags: [Contracts]
+      summary: Generate contract invite
+      description: Creates a short-lived invite link for users to establish a contract
+      operationId: generateInvite
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteInput'
+      responses:
+        '201':
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InviteOutput'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API key authentication
+
+  schemas:
+    AuthRequestInput:
+      type: object
+      required:
+        - user_id
+        - purpose
+      properties:
+        user_id:
+          type: string
+          description: The user's identifier
+          example: 7XhK3mNpQr9sT5vW
+        purpose:
+          type: string
+          description: Human-readable purpose of the authentication
+          example: Login to dashboard
+        context:
+          type: object
+          additionalProperties: true
+          description: Additional context to display to the user
+        timeout:
+          type: string
+          description: Request timeout (duration string)
+          example: 5m
+        offline_grace:
+          type: string
+          description: Grace period for offline approval
+          example: 24h
+        callback_url:
+          type: string
+          format: uri
+          description: Webhook URL for async notification
+
+    AuthRequestOutput:
+      type: object
+      properties:
+        request_id:
+          type: string
+          example: abc123xyz789
+        user_id:
+          type: string
+          example: 7XhK3mNpQr9sT5vW
+        purpose:
+          type: string
+          example: Login to dashboard
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    AuthRequestStatus:
+      type: object
+      properties:
+        request_id:
+          type: string
+        user_id:
+          type: string
+        purpose:
+          type: string
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        responded_at:
+          type: string
+          format: date-time
+
+    AuthzRequestInput:
+      type: object
+      required:
+        - user_id
+        - action
+        - resource
+      properties:
+        user_id:
+          type: string
+          example: 7XhK3mNpQr9sT5vW
+        action:
+          type: string
+          description: The action being requested
+          example: transfer
+        resource:
+          type: string
+          description: The resource the action applies to
+          example: wallet/primary
+        context:
+          type: object
+          additionalProperties: true
+          example:
+            amount: 100.00
+            currency: USD
+        timeout:
+          type: string
+          example: 5m
+        offline_grace:
+          type: string
+          example: 24h
+        callback_url:
+          type: string
+          format: uri
+
+    AuthzRequestOutput:
+      type: object
+      properties:
+        request_id:
+          type: string
+        user_id:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    AuthzRequestStatus:
+      type: object
+      properties:
+        request_id:
+          type: string
+        user_id:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        responded_at:
+          type: string
+          format: date-time
+        approval_expires_at:
+          type: string
+          format: date-time
+          description: When the approval expires (if approved)
+
+    RequestStatus:
+      type: string
+      enum:
+        - pending
+        - approved
+        - denied
+        - expired
+        - offline_approved
+
+    ContractStatus:
+      type: string
+      enum:
+        - pending
+        - active
+        - paused
+        - cancelled
+        - expired
+
+    ContractListOutput:
+      type: object
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContractSummary'
+        next_cursor:
+          type: string
+        total_count:
+          type: integer
+
+    ContractSummary:
+      type: object
+      properties:
+        contract_id:
+          type: string
+        user_id:
+          type: string
+        offering_name:
+          type: string
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        created_at:
+          type: string
+          format: date-time
+        activated_at:
+          type: string
+          format: date-time
+
+    ContractDetail:
+      type: object
+      properties:
+        contract_id:
+          type: string
+        user_id:
+          type: string
+        service_id:
+          type: string
+        offering_id:
+          type: string
+        offering_name:
+          type: string
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        capabilities:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        activated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    InviteInput:
+      type: object
+      required:
+        - offering_id
+      properties:
+        offering_id:
+          type: string
+          example: premium-tier
+        max_uses:
+          type: integer
+          minimum: 1
+          default: 1
+        ttl:
+          type: string
+          description: Time-to-live (duration string)
+          example: 24h
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+
+    InviteOutput:
+      type: object
+      properties:
+        invite_id:
+          type: string
+        offering_id:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        max_uses:
+          type: integer
+        invite_url:
+          type: string
+          format: uri
+
+    APIError:
+      type: object
+      properties:
+        code:
+          type: string
+          example: invalid_request
+        message:
+          type: string
+          example: user_id is required
+        details:
+          type: object
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
+    Forbidden:
+      description: Access denied
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'

@@ -1,0 +1,32 @@
+{
+  "name": "vettid-service-vault-cdk",
+  "version": "0.1.0",
+  "description": "AWS CDK infrastructure for VettID Service Vault",
+  "bin": {
+    "cdk": "bin/cdk.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest",
+    "lint": "tsc --noEmit",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/jest": "^30",
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.24.0",
+    "jest": "^30",
+    "ts-jest": "^29",
+    "aws-cdk": "2.1102.0",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.700.0",
+    "@aws-sdk/util-dynamodb": "^3.700.0",
+    "aws-cdk-lib": "^2.235.1",
+    "constructs": "^10.0.0"
+  }
+}
