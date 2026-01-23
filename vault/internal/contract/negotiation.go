@@ -332,3 +332,249 @@ func VerifyUserSignature(contract *SignedConnectionContract) error {
 	// Verify the signature over the unsigned contract data
 	return crypto.VerifyJSONSignature(contract.UserSignature, contract.ToUnsigned())
 }
+
+// ProposeAmendment creates a new amendment proposal for a contract.
+// The amendment must be signed by both parties before it can be applied.
+func (n *Negotiator) ProposeAmendment(ctx context.Context, contractID string, amendmentType types.AmendmentType, opts ...AmendmentOption) (*ContractAmendment, error) {
+	// Get the contract
+	contract, err := n.store.GetContract(ctx, contractID)
+	if err != nil {
+		return nil, fmt.Errorf("getting contract: %w", err)
+	}
+
+	if contract.Status != types.ContractStatusActive {
+		return nil, fmt.Errorf("contract is not active: %s", contract.Status)
+	}
+
+	// Generate amendment ID
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return nil, fmt.Errorf("generating amendment ID: %w", err)
+	}
+	amendmentID := base64.RawURLEncoding.EncodeToString(idBytes)
+
+	now := time.Now().UTC()
+	amendment := &ContractAmendment{
+		AmendmentID: amendmentID,
+		ContractID:  contractID,
+		Type:        amendmentType,
+		ProposedBy:  n.serviceIdentity.ServiceID,
+		ProposedAt:  now,
+		ExpiresAt:   now.Add(24 * time.Hour), // Default 24h expiration
+		Status:      types.AmendmentStatusPending,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(amendment)
+	}
+
+	// Sign the amendment
+	signingKey, err := n.keystore.GetSigningKey(n.signingKeyID)
+	if err != nil {
+		return nil, fmt.Errorf("getting signing key: %w", err)
+	}
+
+	signature, err := crypto.SignJSON(signingKey, amendment.ToUnsigned())
+	if err != nil {
+		return nil, fmt.Errorf("signing amendment: %w", err)
+	}
+	amendment.ServiceSignature = signature
+
+	// Save the amendment
+	if err := n.store.SaveAmendment(ctx, amendment); err != nil {
+		return nil, fmt.Errorf("saving amendment: %w", err)
+	}
+
+	return amendment, nil
+}
+
+// HandleAmendmentResponse processes a user's response to an amendment proposal.
+func (n *Negotiator) HandleAmendmentResponse(ctx context.Context, amendmentID string, userSignature *crypto.Signature, approved bool) error {
+	// Get the amendment
+	amendment, err := n.store.GetAmendment(ctx, amendmentID)
+	if err != nil {
+		return fmt.Errorf("getting amendment: %w", err)
+	}
+
+	if amendment.Status != types.AmendmentStatusPending {
+		return fmt.Errorf("amendment is not pending: %s", amendment.Status)
+	}
+
+	if time.Now().After(amendment.ExpiresAt) {
+		amendment.Status = types.AmendmentStatusExpired
+		n.store.UpdateAmendment(ctx, amendment)
+		return fmt.Errorf("amendment has expired")
+	}
+
+	// Get the contract to verify user
+	contract, err := n.store.GetContract(ctx, amendment.ContractID)
+	if err != nil {
+		return fmt.Errorf("getting contract: %w", err)
+	}
+
+	if !approved {
+		// User rejected the amendment
+		now := time.Now().UTC()
+		amendment.Status = types.AmendmentStatusRejected
+		amendment.RejectedAt = &now
+		amendment.RejectedBy = contract.UserID
+		return n.store.UpdateAmendment(ctx, amendment)
+	}
+
+	// Verify the user's signature
+	if err := verifyAmendmentSignature(amendment, userSignature, contract.UserID); err != nil {
+		return fmt.Errorf("verifying user signature: %w", err)
+	}
+
+	amendment.UserSignature = userSignature
+	amendment.Status = types.AmendmentStatusApproved
+
+	// Apply the amendment
+	return n.ApplyAmendment(ctx, amendment, contract)
+}
+
+// ApplyAmendment applies an approved amendment to a contract.
+func (n *Negotiator) ApplyAmendment(ctx context.Context, amendment *ContractAmendment, contract *SignedConnectionContract) error {
+	// Both signatures required
+	if amendment.UserSignature == nil || amendment.ServiceSignature == nil {
+		return fmt.Errorf("both signatures required to apply amendment")
+	}
+
+	// Apply the amendment based on type
+	switch amendment.Type {
+	case types.AmendmentAddCapabilities:
+		contract.OfferingSnapshot.Capabilities = append(
+			contract.OfferingSnapshot.Capabilities,
+			amendment.AddCapabilities...,
+		)
+
+	case types.AmendmentRemoveCapabilities:
+		filtered := make([]types.CapabilityGrant, 0, len(contract.OfferingSnapshot.Capabilities))
+		for _, cap := range contract.OfferingSnapshot.Capabilities {
+			remove := false
+			for _, removeCap := range amendment.RemoveCapabilities {
+				if cap.Capability == removeCap {
+					remove = true
+					break
+				}
+			}
+			if !remove {
+				filtered = append(filtered, cap)
+			}
+		}
+		contract.OfferingSnapshot.Capabilities = filtered
+
+	case types.AmendmentExtend:
+		if amendment.NewExpiration != nil {
+			contract.ExpiresAt = amendment.NewExpiration
+		}
+
+	case types.AmendmentUpgrade, types.AmendmentDowngrade:
+		// Find the new offering
+		var newOffering *ContractOffering
+		for _, o := range n.offerings {
+			if o.OfferingID == amendment.NewOfferingID {
+				newOffering = &o
+				break
+			}
+		}
+		if newOffering == nil {
+			return fmt.Errorf("offering not found: %s", amendment.NewOfferingID)
+		}
+		contract.OfferingID = newOffering.OfferingID
+		contract.OfferingSnapshot = *newOffering
+	}
+
+	// Update the contract
+	if err := n.store.UpdateContract(ctx, contract); err != nil {
+		return fmt.Errorf("updating contract: %w", err)
+	}
+
+	// Mark amendment as applied
+	now := time.Now().UTC()
+	amendment.Status = types.AmendmentStatusApplied
+	amendment.AppliedAt = &now
+
+	return n.store.UpdateAmendment(ctx, amendment)
+}
+
+// GetAmendment retrieves an amendment by ID.
+func (n *Negotiator) GetAmendment(ctx context.Context, amendmentID string) (*ContractAmendment, error) {
+	return n.store.GetAmendment(ctx, amendmentID)
+}
+
+// ListAmendments lists amendments for a contract.
+func (n *Negotiator) ListAmendments(ctx context.Context, contractID string, status *types.AmendmentStatus) ([]*ContractAmendment, error) {
+	return n.store.ListAmendments(ctx, AmendmentFilter{
+		ContractID: contractID,
+		Status:     status,
+	})
+}
+
+// verifyAmendmentSignature verifies a signature on an amendment.
+func verifyAmendmentSignature(amendment *ContractAmendment, signature *crypto.Signature, expectedUserID string) error {
+	if signature == nil {
+		return fmt.Errorf("signature is missing")
+	}
+
+	// Get the public key from the signature
+	pubKey, err := crypto.GetPublicKeyFromSignature(signature)
+	if err != nil {
+		return fmt.Errorf("extracting public key: %w", err)
+	}
+
+	// Verify user_id matches the public key
+	derivedUserID := identity.DeriveServiceID(ed25519.PublicKey(pubKey))
+	if derivedUserID != expectedUserID {
+		return fmt.Errorf("user_id does not match signing key")
+	}
+
+	// Verify the signature over the unsigned amendment data
+	return crypto.VerifyJSONSignature(signature, amendment.ToUnsigned())
+}
+
+// AmendmentOption configures an amendment.
+type AmendmentOption func(*ContractAmendment)
+
+// WithAddCapabilities sets capabilities to add.
+func WithAddCapabilities(caps []types.CapabilityGrant) AmendmentOption {
+	return func(a *ContractAmendment) {
+		a.AddCapabilities = caps
+	}
+}
+
+// WithRemoveCapabilities sets capabilities to remove.
+func WithRemoveCapabilities(caps []types.CapabilityType) AmendmentOption {
+	return func(a *ContractAmendment) {
+		a.RemoveCapabilities = caps
+	}
+}
+
+// WithNewOffering sets a new offering for upgrade/downgrade.
+func WithNewOffering(offeringID string) AmendmentOption {
+	return func(a *ContractAmendment) {
+		a.NewOfferingID = offeringID
+	}
+}
+
+// WithNewExpiration sets a new expiration for extension.
+func WithNewExpiration(exp time.Time) AmendmentOption {
+	return func(a *ContractAmendment) {
+		a.NewExpiration = &exp
+	}
+}
+
+// WithAmendmentReason sets the reason for the amendment.
+func WithAmendmentReason(reason string) AmendmentOption {
+	return func(a *ContractAmendment) {
+		a.Reason = reason
+	}
+}
+
+// WithAmendmentExpiration sets when the amendment proposal expires.
+func WithAmendmentExpiration(exp time.Time) AmendmentOption {
+	return func(a *ContractAmendment) {
+		a.ExpiresAt = exp
+	}
+}

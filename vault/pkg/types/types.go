@@ -49,6 +49,16 @@ const (
 	CapabilityReadData     CapabilityType = "read_data"
 	CapabilityWriteData    CapabilityType = "write_data"
 	CapabilitySign         CapabilityType = "sign"
+	CapabilityBrowseData   CapabilityType = "browse_data"
+	CapabilityRequestData  CapabilityType = "request_data"
+	CapabilityNotify       CapabilityType = "notify"
+)
+
+// Capability aliases for handler package
+type Capability = CapabilityType
+
+const (
+	CapabilityBrowse = CapabilityBrowseData
 )
 
 // CapabilityGrant represents a specific capability granted to a service.
@@ -154,6 +164,91 @@ type AuthzResponse struct {
 	Signature  Signature     `json:"signature"`
 	ExpiresAt  *time.Time    `json:"expires_at,omitempty"` // When approval expires
 }
+
+// DataRequest represents a request for user data.
+type DataRequest struct {
+	RequestID    string                 `json:"request_id"`
+	UserID       string                 `json:"user_id"`
+	RequestType  string                 `json:"request_type"` // browse_metadata or request_data
+	DataTypes    []string               `json:"data_types,omitempty"`
+	DataPaths    []string               `json:"data_paths,omitempty"`
+	Purpose      string                 `json:"purpose"`
+	Context      map[string]interface{} `json:"context,omitempty"`
+	ExpiresAt    time.Time              `json:"expires_at"`
+	OfflineGrace time.Duration          `json:"offline_grace,omitempty"`
+	CallbackURL  string                 `json:"callback_url,omitempty"`
+}
+
+// DataResponse represents a user's response to a data request.
+type DataResponse struct {
+	RequestID   string                 `json:"request_id"`
+	Status      RequestStatus          `json:"status"`
+	Data        map[string]interface{} `json:"data,omitempty"`
+	Metadata    []DataTypeMetadata     `json:"metadata,omitempty"`
+	Timestamp   time.Time              `json:"timestamp"`
+	Signature   *Signature             `json:"signature,omitempty"`
+	Constraints map[string]interface{} `json:"constraints,omitempty"`
+}
+
+// DataTypeMetadata describes available data types.
+type DataTypeMetadata struct {
+	DataType    string `json:"data_type"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Available   bool   `json:"available"`
+}
+
+// Notification represents a notification sent to a user.
+type Notification struct {
+	NotificationID string                 `json:"notification_id"`
+	Title          string                 `json:"title"`
+	Body           string                 `json:"body"`
+	Category       string                 `json:"category"`
+	Priority       string                 `json:"priority"`
+	Data           map[string]interface{} `json:"data,omitempty"`
+	ActionURL      string                 `json:"action_url,omitempty"`
+	ImageURL       string                 `json:"image_url,omitempty"`
+	ExpiresAt      *time.Time             `json:"expires_at,omitempty"`
+	CreatedAt      time.Time              `json:"created_at"`
+}
+
+// ContractAmendment represents a proposed change to an existing contract.
+type ContractAmendment struct {
+	AmendmentID       string            `json:"amendment_id"`
+	ContractID        string            `json:"contract_id"`
+	Type              AmendmentType     `json:"type"`
+	Capabilities      []CapabilityGrant `json:"capabilities,omitempty"`       // For add/remove capabilities
+	NewOfferingID     string            `json:"new_offering_id,omitempty"`    // For upgrade/downgrade
+	Reason            string            `json:"reason,omitempty"`
+	ProposedBy        string            `json:"proposed_by"`                  // user_id or service_id
+	ProposedAt        time.Time         `json:"proposed_at"`
+	UserSignature     *Signature        `json:"user_signature,omitempty"`
+	ServiceSignature  *Signature        `json:"service_signature,omitempty"`
+	Status            AmendmentStatus   `json:"status"`
+	AppliedAt         *time.Time        `json:"applied_at,omitempty"`
+}
+
+// AmendmentType indicates the type of contract amendment.
+type AmendmentType string
+
+const (
+	AmendmentAddCapabilities    AmendmentType = "add_capabilities"
+	AmendmentRemoveCapabilities AmendmentType = "remove_capabilities"
+	AmendmentUpgrade            AmendmentType = "upgrade"
+	AmendmentDowngrade          AmendmentType = "downgrade"
+	AmendmentExtend             AmendmentType = "extend"
+)
+
+// AmendmentStatus indicates the status of an amendment.
+type AmendmentStatus string
+
+const (
+	AmendmentStatusPending  AmendmentStatus = "pending"
+	AmendmentStatusApproved AmendmentStatus = "approved"
+	AmendmentStatusRejected AmendmentStatus = "rejected"
+	AmendmentStatusApplied  AmendmentStatus = "applied"
+	AmendmentStatusExpired  AmendmentStatus = "expired"
+)
 
 // Error codes for API responses.
 const (

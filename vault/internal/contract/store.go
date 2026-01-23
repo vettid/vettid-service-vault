@@ -15,6 +15,8 @@ var (
 	ErrInviteExpired       = errors.New("invite has expired")
 	ErrInviteExhausted     = errors.New("invite has reached maximum uses")
 	ErrInvalidContractData = errors.New("invalid contract data")
+	ErrAmendmentNotFound   = errors.New("amendment not found")
+	ErrAmendmentExists     = errors.New("amendment already exists")
 )
 
 // Store defines the interface for contract persistence.
@@ -66,4 +68,21 @@ type Store interface {
 
 	// CleanupExpired removes expired contracts and invites.
 	CleanupExpired(ctx context.Context) (int, error)
+
+	// Amendment operations
+
+	// SaveAmendment stores a new contract amendment.
+	SaveAmendment(ctx context.Context, amendment *ContractAmendment) error
+
+	// GetAmendment retrieves an amendment by ID.
+	GetAmendment(ctx context.Context, amendmentID string) (*ContractAmendment, error)
+
+	// UpdateAmendment updates an existing amendment.
+	UpdateAmendment(ctx context.Context, amendment *ContractAmendment) error
+
+	// ListAmendments retrieves amendments matching the filter.
+	ListAmendments(ctx context.Context, filter AmendmentFilter) ([]*ContractAmendment, error)
+
+	// DeleteAmendment removes an amendment.
+	DeleteAmendment(ctx context.Context, amendmentID string) error
 }

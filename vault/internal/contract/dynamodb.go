@@ -413,3 +413,182 @@ func (s *DynamoDBStore) CleanupExpired(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
+// amendmentItem is the DynamoDB item representation of an amendment.
+type amendmentItem struct {
+	ServiceID   string             `dynamodbav:"service_id"`
+	AmendmentID string             `dynamodbav:"contract_id"` // Use contract_id slot with prefix
+	ContractID  string             `dynamodbav:"amendment_contract_id"`
+	Status      string             `dynamodbav:"status"`
+	Data        *ContractAmendment `dynamodbav:"data"`
+	TTL         int64              `dynamodbav:"ttl,omitempty"`
+}
+
+// SaveAmendment stores a new contract amendment.
+func (s *DynamoDBStore) SaveAmendment(ctx context.Context, amendment *ContractAmendment) error {
+	item := amendmentItem{
+		ServiceID:   s.serviceID,
+		AmendmentID: "amendment#" + amendment.AmendmentID,
+		ContractID:  amendment.ContractID,
+		Status:      string(amendment.Status),
+		Data:        amendment,
+		TTL:         amendment.ExpiresAt.Unix(),
+	}
+
+	av, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		return fmt.Errorf("marshaling amendment: %w", err)
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           aws.String(s.tableName),
+		Item:                av,
+		ConditionExpression: aws.String("attribute_not_exists(contract_id)"),
+	})
+
+	if err != nil {
+		var ccf *ddbtypes.ConditionalCheckFailedException
+		if stderrors.As(err, &ccf) {
+			return ErrAmendmentExists
+		}
+		return fmt.Errorf("saving amendment: %w", err)
+	}
+
+	return nil
+}
+
+// GetAmendment retrieves an amendment by ID.
+func (s *DynamoDBStore) GetAmendment(ctx context.Context, amendmentID string) (*ContractAmendment, error) {
+	result, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.tableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			"service_id":  &ddbtypes.AttributeValueMemberS{Value: s.serviceID},
+			"contract_id": &ddbtypes.AttributeValueMemberS{Value: "amendment#" + amendmentID},
+		},
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("getting amendment: %w", err)
+	}
+
+	if result.Item == nil {
+		return nil, ErrAmendmentNotFound
+	}
+
+	var item amendmentItem
+	if err := attributevalue.UnmarshalMap(result.Item, &item); err != nil {
+		return nil, fmt.Errorf("unmarshaling amendment: %w", err)
+	}
+
+	return item.Data, nil
+}
+
+// UpdateAmendment updates an existing amendment.
+func (s *DynamoDBStore) UpdateAmendment(ctx context.Context, amendment *ContractAmendment) error {
+	item := amendmentItem{
+		ServiceID:   s.serviceID,
+		AmendmentID: "amendment#" + amendment.AmendmentID,
+		ContractID:  amendment.ContractID,
+		Status:      string(amendment.Status),
+		Data:        amendment,
+	}
+
+	// Clear TTL for completed amendments
+	if amendment.Status == types.AmendmentStatusApplied ||
+		amendment.Status == types.AmendmentStatusRejected {
+		item.TTL = 0
+	} else {
+		item.TTL = amendment.ExpiresAt.Unix()
+	}
+
+	av, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		return fmt.Errorf("marshaling amendment: %w", err)
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           aws.String(s.tableName),
+		Item:                av,
+		ConditionExpression: aws.String("attribute_exists(contract_id)"),
+	})
+
+	if err != nil {
+		var ccf *ddbtypes.ConditionalCheckFailedException
+		if stderrors.As(err, &ccf) {
+			return ErrAmendmentNotFound
+		}
+		return fmt.Errorf("updating amendment: %w", err)
+	}
+
+	return nil
+}
+
+// ListAmendments retrieves amendments matching the filter.
+func (s *DynamoDBStore) ListAmendments(ctx context.Context, filter AmendmentFilter) ([]*ContractAmendment, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	// Query by service_id with amendment# prefix
+	input := &dynamodb.QueryInput{
+		TableName:              aws.String(s.tableName),
+		KeyConditionExpression: aws.String("service_id = :sid AND begins_with(contract_id, :prefix)"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":sid":    &ddbtypes.AttributeValueMemberS{Value: s.serviceID},
+			":prefix": &ddbtypes.AttributeValueMemberS{Value: "amendment#"},
+		},
+		Limit: aws.Int32(int32(limit)),
+	}
+
+	// Add filters
+	var filterExprs []string
+	if filter.ContractID != "" {
+		filterExprs = append(filterExprs, "amendment_contract_id = :cid")
+		input.ExpressionAttributeValues[":cid"] = &ddbtypes.AttributeValueMemberS{Value: filter.ContractID}
+	}
+	if filter.Status != nil {
+		filterExprs = append(filterExprs, "#status = :status")
+		if input.ExpressionAttributeNames == nil {
+			input.ExpressionAttributeNames = make(map[string]string)
+		}
+		input.ExpressionAttributeNames["#status"] = "status"
+		input.ExpressionAttributeValues[":status"] = &ddbtypes.AttributeValueMemberS{Value: string(*filter.Status)}
+	}
+
+	if len(filterExprs) > 0 {
+		expr := filterExprs[0]
+		for i := 1; i < len(filterExprs); i++ {
+			expr += " AND " + filterExprs[i]
+		}
+		input.FilterExpression = aws.String(expr)
+	}
+
+	result, err := s.client.Query(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("querying amendments: %w", err)
+	}
+
+	amendments := make([]*ContractAmendment, 0, len(result.Items))
+	for _, item := range result.Items {
+		var ai amendmentItem
+		if err := attributevalue.UnmarshalMap(item, &ai); err != nil {
+			return nil, fmt.Errorf("unmarshaling amendment: %w", err)
+		}
+		amendments = append(amendments, ai.Data)
+	}
+
+	return amendments, nil
+}
+
+// DeleteAmendment removes an amendment.
+func (s *DynamoDBStore) DeleteAmendment(ctx context.Context, amendmentID string) error {
+	_, err := s.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(s.tableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			"service_id":  &ddbtypes.AttributeValueMemberS{Value: s.serviceID},
+			"contract_id": &ddbtypes.AttributeValueMemberS{Value: "amendment#" + amendmentID},
+		},
+	})
+	return err
+}
+

@@ -233,3 +233,99 @@ type ContractListResult struct {
 	// TotalCount is the total number of matching contracts (if available)
 	TotalCount int `json:"total_count,omitempty"`
 }
+
+// ContractAmendment represents a proposed change to an existing contract.
+// Amendments allow modifying contracts without full re-negotiation.
+type ContractAmendment struct {
+	// AmendmentID uniquely identifies this amendment
+	AmendmentID string `json:"amendment_id"`
+
+	// ContractID is the contract being amended
+	ContractID string `json:"contract_id"`
+
+	// Type indicates what kind of change this is
+	Type types.AmendmentType `json:"type"`
+
+	// AddCapabilities are capabilities to add (for add_capabilities type)
+	AddCapabilities []types.CapabilityGrant `json:"add_capabilities,omitempty"`
+
+	// RemoveCapabilities are capabilities to remove (for remove_capabilities type)
+	RemoveCapabilities []types.CapabilityType `json:"remove_capabilities,omitempty"`
+
+	// NewOfferingID is the new offering (for upgrade/downgrade types)
+	NewOfferingID string `json:"new_offering_id,omitempty"`
+
+	// NewExpiration extends the contract (for extend type)
+	NewExpiration *time.Time `json:"new_expiration,omitempty"`
+
+	// Reason explains why the amendment is proposed
+	Reason string `json:"reason,omitempty"`
+
+	// ProposedBy identifies who proposed this (user_id or service_id)
+	ProposedBy string `json:"proposed_by"`
+
+	// ProposedAt is when the amendment was proposed
+	ProposedAt time.Time `json:"proposed_at"`
+
+	// ExpiresAt is when this amendment proposal expires
+	ExpiresAt time.Time `json:"expires_at"`
+
+	// UserSignature is the user's approval signature
+	UserSignature *crypto.Signature `json:"user_signature,omitempty"`
+
+	// ServiceSignature is the service's approval signature
+	ServiceSignature *crypto.Signature `json:"service_signature,omitempty"`
+
+	// Status is the current amendment status
+	Status types.AmendmentStatus `json:"status"`
+
+	// AppliedAt is when the amendment was applied
+	AppliedAt *time.Time `json:"applied_at,omitempty"`
+
+	// RejectedAt is when the amendment was rejected
+	RejectedAt *time.Time `json:"rejected_at,omitempty"`
+
+	// RejectedBy identifies who rejected
+	RejectedBy string `json:"rejected_by,omitempty"`
+
+	// RejectionReason explains why it was rejected
+	RejectionReason string `json:"rejection_reason,omitempty"`
+}
+
+// UnsignedAmendment is the amendment data that gets signed.
+type UnsignedAmendment struct {
+	AmendmentID        string                  `json:"amendment_id"`
+	ContractID         string                  `json:"contract_id"`
+	Type               types.AmendmentType     `json:"type"`
+	AddCapabilities    []types.CapabilityGrant `json:"add_capabilities,omitempty"`
+	RemoveCapabilities []types.CapabilityType  `json:"remove_capabilities,omitempty"`
+	NewOfferingID      string                  `json:"new_offering_id,omitempty"`
+	NewExpiration      *time.Time              `json:"new_expiration,omitempty"`
+	Reason             string                  `json:"reason,omitempty"`
+	ProposedBy         string                  `json:"proposed_by"`
+	ProposedAt         time.Time               `json:"proposed_at"`
+}
+
+// ToUnsigned extracts the signable portion of an amendment.
+func (a *ContractAmendment) ToUnsigned() UnsignedAmendment {
+	return UnsignedAmendment{
+		AmendmentID:        a.AmendmentID,
+		ContractID:         a.ContractID,
+		Type:               a.Type,
+		AddCapabilities:    a.AddCapabilities,
+		RemoveCapabilities: a.RemoveCapabilities,
+		NewOfferingID:      a.NewOfferingID,
+		NewExpiration:      a.NewExpiration,
+		Reason:             a.Reason,
+		ProposedBy:         a.ProposedBy,
+		ProposedAt:         a.ProposedAt,
+	}
+}
+
+// AmendmentFilter specifies criteria for querying amendments.
+type AmendmentFilter struct {
+	ContractID string
+	Status     *types.AmendmentStatus
+	ProposedBy string
+	Limit      int
+}
