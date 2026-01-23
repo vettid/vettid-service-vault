@@ -1,0 +1,66 @@
+version: 2
+updates:
+  # Go vault
+  - package-ecosystem: "gomod"
+    directory: "/vault"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+
+  # Go SDK
+  - package-ecosystem: "gomod"
+    directory: "/sdk/go"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-sdk-dependencies:
+        patterns:
+          - "*"
+
+  # CDK
+  - package-ecosystem: "npm"
+    directory: "/cdk"
+    schedule:
+      interval: "weekly"
+    groups:
+      cdk-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "aws-cdk*"
+      aws-cdk:
+        patterns:
+          - "aws-cdk*"
+
+  # Node.js SDK
+  - package-ecosystem: "npm"
+    directory: "/sdk/nodejs"
+    schedule:
+      interval: "weekly"
+    groups:
+      nodejs-sdk-dependencies:
+        patterns:
+          - "*"
+
+  # Python SDK
+  - package-ecosystem: "pip"
+    directory: "/sdk/python"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-sdk-dependencies:
+        patterns:
+          - "*"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
