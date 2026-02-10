@@ -95,6 +95,14 @@ See the architecture document for open questions requiring team input:
 4. Multi-vault deployment strategy for regional services?
 5. Service directory for user discovery?
 
+## Related Repositories
+
+- [vettid-dev](https://github.com/vettid/vettid-dev) - Backend infrastructure
+- [vettid-android](https://github.com/vettid/vettid-android) - Android app
+- [vettid-ios](https://github.com/vettid/vettid-ios) - iOS app
+- [vettid-desktop](https://github.com/vettid/vettid-desktop) - Desktop app (Tauri/Rust/Svelte)
+- [vettid-agent](https://github.com/vettid/vettid-agent) - Agent connector (Go sidecar)
+
 ## Contributing
 
 This project follows the same development practices as the main VettID repository.
