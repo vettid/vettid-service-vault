@@ -1,5 +1,11 @@
 # VettID Service Vault
 
+> **Retired.** This NATS-based prototype is no longer developed and none of
+> its code is reused. The service vault is being rebuilt as a VMS v2 peer on
+> the VettID relay in [vettid/service-vault](https://github.com/vettid/service-vault);
+> its first deployment is [vettid/member-service](https://github.com/vettid/member-service).
+> This repository is archived and kept read-only for reference.
+
 Secure integration layer enabling third-party services to connect with VettID users.
 
 ## Overview
